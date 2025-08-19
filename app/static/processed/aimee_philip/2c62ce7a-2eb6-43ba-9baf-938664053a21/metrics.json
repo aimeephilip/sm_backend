@@ -1,0 +1,8 @@
+{
+  "movement": "hip_flexion",
+  "side": "left",
+  "min_flexion": 6.08,
+  "max_flexion": 100.71,
+  "rom": 94.62,
+  "timestamp": "2025-08-04T14:31:13.212835Z"
+}

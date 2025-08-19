@@ -1,0 +1,74 @@
+[
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 33.38,
+    "max_angle": 69.87,
+    "rom": 36.49,
+    "timestamp": "2025-08-05T21:04:50.322931Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 3.81,
+    "max_angle": 96.2,
+    "rom": 92.39,
+    "timestamp": "2025-08-05T21:14:09.757697Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 13.8,
+    "max_angle": 169.51,
+    "rom": 155.72,
+    "timestamp": "2025-08-05T21:15:22.154262Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": Infinity,
+    "max_angle": -Infinity,
+    "rom": -Infinity,
+    "timestamp": "2025-08-05T21:21:29.470874Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 0.76,
+    "max_angle": 136.73,
+    "rom": 135.97,
+    "timestamp": "2025-08-05T21:24:28.348945Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 4.62,
+    "max_angle": 152.94,
+    "rom": 148.32,
+    "timestamp": "2025-08-05T21:26:35.770117Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "right",
+    "min_angle": 22.67,
+    "max_angle": 176.31,
+    "rom": 153.64,
+    "timestamp": "2025-08-07T11:03:30.679301Z"
+  },
+  {
+    "movement": "hip_flexion",
+    "side": "left",
+    "min_angle": 2.98,
+    "max_angle": 31.68,
+    "rom": 28.7,
+    "timestamp": "2025-08-07T11:04:04.757921Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 24.15,
+    "max_angle": 171.84,
+    "rom": 147.69,
+    "timestamp": "2025-08-07T11:29:25.623227Z"
+  }
+]

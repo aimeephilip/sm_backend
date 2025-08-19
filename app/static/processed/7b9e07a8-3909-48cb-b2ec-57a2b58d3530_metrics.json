@@ -1,0 +1,8 @@
+{
+  "movement": "shoulder_abduction",
+  "side": "left",
+  "min_angle": 11.0,
+  "max_angle": 179.89,
+  "rom": 168.9,
+  "timestamp": "2025-08-01T13:21:28.658027Z"
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "movement": "hip_flexion",
+    "side": "left",
+    "min_angle": 6.08,
+    "max_angle": 100.71,
+    "rom": 94.62,
+    "timestamp": "2025-08-04T14:59:13.903242Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "right",
+    "min_angle": 9.3,
+    "max_angle": 171.2,
+    "rom": 161.9,
+    "timestamp": "2025-08-04T15:12:13.636580Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 36.08,
+    "max_angle": 171.11,
+    "rom": 135.03,
+    "timestamp": "2025-08-07T11:40:31.159048Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 16.79,
+    "max_angle": 135.83,
+    "rom": 119.03,
+    "timestamp": "2025-08-07T11:49:13.149377Z"
+  },
+  {
+    "movement": "shoulder_abduction",
+    "side": "left",
+    "min_angle": 9.13,
+    "max_angle": 171.53,
+    "rom": 162.41,
+    "timestamp": "2025-08-07T11:58:26.846887Z"
+  }
+]
