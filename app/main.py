@@ -1,3 +1,4 @@
+# app/main.py
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,59 +7,67 @@ import os
 import shutil
 import json
 
-from app.services.processor import process_video  # your existing import
+from app.services.processor import process_video  # your existing processing function
 
-app = FastAPI()
+app = FastAPI(
+    title="StretchMasters Backend",
+    version="0.1.0",
+)
 
-# Allow your mobile app (and browsers) to call this API during testing
+# --- CORS (testing-friendly; tighten later) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten later to specific origins
+    allow_origins=["*"],      # e.g., ["https://your-app.com"] in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "app/static/processed"
-HISTORY_DIR = os.path.join("app", "static", "history")
+# --- Simple root + health endpoints ---
+@app.get("/", include_in_schema=False)
+def root():
+    return {"status": "ok", "service": "sm-backend"}
 
-# Ensure folders exist (safe if already present)
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(HISTORY_DIR, exist_ok=True)
-
-@app.get("/health")
+@app.get("/health", include_in_schema=False)
 def health():
     return {"ok": True}
 
+# --- Storage paths (make sure they exist) ---
+UPLOAD_DIR = os.path.join("app", "static", "processed")
+HISTORY_DIR = os.path.join("app", "static", "history")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(HISTORY_DIR, exist_ok=True)
+
+# --- Upload & process video ---
 @app.post("/upload/")
 async def upload_video(
     file: UploadFile = File(...),
     movement_type: str = Form(...),
     side: str = Form("left"),
-    client_id: str = Form(...)
+    client_id: str = Form(...),
 ):
-    # Create a unique folder for this upload
-    ext = os.path.splitext(file.filename)[1]
+    # create a unique folder for this upload
+    ext = os.path.splitext(file.filename or "video.mp4")[1]
     file_id = str(uuid.uuid4())
     upload_dir = os.path.join(UPLOAD_DIR, client_id, file_id)
     os.makedirs(upload_dir, exist_ok=True)
 
-    # Save original video
-    original_filename = f"original{ext}"
-    file_path = os.path.join(upload_dir, original_filename)
-    with open(file_path, "wb") as buffer:
+    # save original video
+    original_path = os.path.join(upload_dir, f"original{ext}")
+    with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Process video (your existing pipeline)
-    result = process_video(file_path, movement_type, side, client_id)
-    result["folder"] = upload_dir  # optional: return path to frontend
+    # process video with your pipeline
+    result = process_video(original_path, movement_type, side, client_id)
+    result["folder"] = upload_dir  # optional for frontend debugging
 
     return {
         "message": "Upload and processing successful",
         "file_id": file_id,
-        "results": result
+        "results": result,
     }
 
+# --- Fetch history for a client ---
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str):
     history_file = os.path.join(HISTORY_DIR, f"{client_id}.json")
@@ -69,3 +78,14 @@ def get_client_history(client_id: str):
         history = json.load(f)
 
     return {"client_id": client_id, "history": history}
+
+# --- Debug: print routes at startup so we can see them in Render logs ---
+@app.on_event("startup")
+async def _log_routes():
+    print("=== ROUTES ===")
+    for r in app.routes:
+        try:
+            print(getattr(r, "path"))
+        except Exception:
+            pass
+    print("==============")
