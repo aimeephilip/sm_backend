@@ -11,7 +11,7 @@ from app.services.processor import process_video  # your existing processing fun
 
 app = FastAPI(
     title="StretchMasters Backend",
-    version="0.1.0",
+    version="0.1.1",
 )
 
 # --- CORS (testing-friendly; tighten later) ---
@@ -38,6 +38,16 @@ HISTORY_DIR = os.path.join("app", "static", "history")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
+def _parse_bool(value: str, default: bool = True) -> bool:
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
+
 # --- Upload & process video ---
 @app.post("/upload/")
 async def upload_video(
@@ -45,6 +55,8 @@ async def upload_video(
     movement_type: str = Form(...),
     side: str = Form("left"),
     client_id: str = Form(...),
+    session_id: str = Form(None),               # NEW (optional)
+    compute_symmetry: str = Form("true"),       # NEW (string -> bool)
 ):
     # create a unique folder for this upload
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -58,7 +70,14 @@ async def upload_video(
         shutil.copyfileobj(file.file, buffer)
 
     # process video with your pipeline
-    result = process_video(original_path, movement_type, side, client_id)
+    result = process_video(
+        original_path,
+        movement_type,
+        side,
+        client_id,
+        session_id=session_id,
+        compute_symmetry=_parse_bool(compute_symmetry, default=True),
+    )
     result["folder"] = upload_dir  # optional for frontend debugging
 
     return {
