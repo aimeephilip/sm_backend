@@ -2,7 +2,7 @@
 from app.services.shoulder_abduction import process_shoulder_abduction
 from app.services.hip_flexion import process_hip_flexion
 
-# NEW imports (added)
+# New imports
 from app.services.shoulder_flexion import process_shoulder_flexion
 from app.services.elbow_flexion import process_elbow_flexion
 from app.services.shoulder_internal_rotation import process_shoulder_internal_rotation
@@ -36,8 +36,12 @@ def process_video(
 
     elif mt == "hip_flexion":
         return process_h
+        # ^^^ DELETE THIS LINE if it exists in your file. It was an artifact.
+        # The correct line is immediately below:
 
-    # NEW routes
+    elif mt == "hip_flexion":
+        return process_hip_flexion(filepath, side=side, client_id=client_id)
+
     elif mt == "shoulder_flexion":
         return process_shoulder_flexion(filepath, side=side, client_id=client_id)
 
