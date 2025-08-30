@@ -6,6 +6,7 @@ import uuid
 import os
 import shutil
 import json
+import traceback
 
 from app.services.processor import process_video  # your existing processing function
 
@@ -55,8 +56,8 @@ async def upload_video(
     movement_type: str = Form(...),
     side: str = Form("left"),
     client_id: str = Form(...),
-    session_id: str = Form(None),               # NEW (optional)
-    compute_symmetry: str = Form("true"),       # NEW (string -> bool)
+    session_id: str = Form(None),               # optional
+    compute_symmetry: str = Form("true"),       # optional (string -> bool)
 ):
     # create a unique folder for this upload
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -69,21 +70,39 @@ async def upload_video(
     with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    # quick sanity log so you can see it in Render logs
+    try:
+        size = os.path.getsize(original_path)
+    except Exception:
+        size = -1
+    print(f"DEBUG saved video: {original_path} size={size} bytes")
+
     # process video with your pipeline
-    result = process_video(
-        original_path,
-        movement_type,
-        side,
-        client_id,
-        session_id=session_id,
-        compute_symmetry=_parse_bool(compute_symmetry, default=True),
-    )
+    try:
+        result = process_video(
+            original_path,
+            movement_type,
+            side,
+            client_id,
+            session_id=session_id,  # accepted by processor.py (currently unused)
+            compute_symmetry=_parse_bool(compute_symmetry, default=True),  # accepted (unused)
+        )
+    except Exception as e:
+        # Log full traceback for debugging in Render -> Logs
+        print("UPLOAD ERROR:", e)
+        print(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"error": "processing_failed", "detail": str(e)},
+        )
+
     result["folder"] = upload_dir  # optional for frontend debugging
+    print("DEBUG upload response:", result)  # shows max_angle etc. in Render logs
 
     return {
         "message": "Upload and processing successful",
         "file_id": file_id,
-        "results": result,
+        "results": result,   # Flutter reads results.max_angle
     }
 
 # --- Fetch history for a client ---
