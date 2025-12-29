@@ -18,6 +18,7 @@ from app.db import create_db_and_tables, get_session
 import app.models
 import app.models_movement
 import app.models_clinician
+import app.models_notes
 
 from app.models import User
 from app.utils.users import get_or_create_user
