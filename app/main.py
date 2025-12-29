@@ -232,6 +232,14 @@ def get_client_history(client_id: str):
 
     return {"client_id": client_id, "history": history}
 
+@app.get("/me/role")
+def me_role(client_id: str, session: Session = Depends(get_session)):
+    user = session.exec(select(User).where(User.email == f"{client_id}@local")).first()
+    if not user:
+        return {"role": "patient"}  # default
+    return {"role": user.role}
+
+
 # --- Startup: create DB tables ---
 @app.on_event("startup")
 async def _init_db():
