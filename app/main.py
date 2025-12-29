@@ -144,6 +144,23 @@ async def upload_video(
         "results": result,
     }
 
+@app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
+def make_clinician(client_id: str, session: Session = Depends(get_session)):
+    fake_email = f"{client_id}@local"
+    user = session.exec(
+        select(User).where(User.email == fake_email)
+    ).first()
+
+    if not user:
+        return {"error": "user_not_found"}
+
+    user.role = "clinician"
+    session.add(user)
+    session.commit()
+
+    return {"ok": True, "user_id": user.id, "role": user.role}
+
+
 # --- Fetch history (JSON-based, unchanged) ---
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str):
