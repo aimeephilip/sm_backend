@@ -1,8 +1,8 @@
 # app/services/processor.py
+
 from app.services.shoulder_abduction import process_shoulder_abduction
 from app.services.hip_flexion import process_hip_flexion
 
-# New imports
 from app.services.shoulder_flexion import process_shoulder_flexion
 from app.services.elbow_flexion import process_elbow_flexion
 from app.services.shoulder_internal_rotation import process_shoulder_internal_rotation
@@ -34,37 +34,31 @@ def process_video(
     if mt == "shoulder_abduction":
         return process_shoulder_abduction(filepath, side=side, client_id=client_id)
 
-    elif mt == "hip_flexion":
-        return process_h
-        # ^^^ DELETE THIS LINE if it exists in your file. It was an artifact.
-        # The correct line is immediately below:
-
-    elif mt == "hip_flexion":
+    if mt == "hip_flexion":
         return process_hip_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "shoulder_flexion":
+    if mt == "shoulder_flexion":
         return process_shoulder_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "elbow_flexion":
+    if mt == "elbow_flexion":
         return process_elbow_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "shoulder_internal_rotation":
+    if mt == "shoulder_internal_rotation":
         return process_shoulder_internal_rotation(filepath, side=side, client_id=client_id)
 
-    elif mt == "neck_flexion":
+    if mt == "neck_flexion":
         return process_neck_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "neck_lateral_flexion":
+    if mt == "neck_lateral_flexion":
         return process_neck_lateral_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "hip_abduction":
+    if mt == "hip_abduction":
         return process_hip_abduction(filepath, side=side, client_id=client_id)
 
-    elif mt == "knee_flexion":
+    if mt == "knee_flexion":
         return process_knee_flexion(filepath, side=side, client_id=client_id)
 
-    elif mt == "ankle_dorsiflexion":
+    if mt == "ankle_dorsiflexion":
         return process_ankle_dorsiflexion(filepath, side=side, client_id=client_id)
 
-    else:
-        raise ValueError(f"Unsupported movement_type: {movement_type}")
+    raise ValueError(f"Unsupported movement_type: {movement_type}")
