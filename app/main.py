@@ -2,6 +2,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import app.models_movement
 import uuid
 import os
 import shutil
