@@ -11,18 +11,20 @@ import traceback
 from sqlmodel import Session, select
 
 from app.services.processor import process_video
-
 from app.db import create_db_and_tables, get_session
 
-# Register SQLModel tables (important: these imports ensure tables get created)
-import app.models
-import app.models_movement
-import app.models_clinician
-import app.models_notes
+# Register SQLModel tables (imports ensure tables are created)
+import app.models                      # User
+import app.models_movement             # MovementResult
+import app.models_clinician            # ClinicianPatient
+import app.models_notes                # ClinicalNote
 
 from app.models import User
 from app.utils.users import get_or_create_user
 from app.utils.results import save_result
+
+from app.models_notes import ClinicalNote
+from app.utils.permissions import get_user_by_client_id, clinician_can_access_patient
 
 
 app = FastAPI(
@@ -47,6 +49,14 @@ def root():
 @app.get("/health", include_in_schema=False)
 def health():
     return {"ok": True}
+
+# --- Role lookup (used by Flutter role-based routing) ---
+@app.get("/me/role")
+def me_role(client_id: str, session: Session = Depends(get_session)):
+    user = session.exec(select(User).where(User.email == f"{client_id}@local")).first()
+    if not user:
+        return {"role": "patient"}  # default
+    return {"role": user.role}
 
 # --- TEMP Debug endpoint: users ---
 @app.get("/debug/db", include_in_schema=False)
@@ -132,6 +142,79 @@ def clinician_patients(
     return {
         "clinician": clinician.email,
         "patients": [{"id": p.id, "email": p.email} for p in patients],
+    }
+
+# --- Clinician: list notes for a patient (permission-checked) ---
+@app.get("/clinician/patient/notes")
+def clinician_list_notes(
+    clinician_client_id: str,
+    patient_client_id: str,
+    session: Session = Depends(get_session),
+):
+    clinician = get_user_by_client_id(session, clinician_client_id)
+    patient = get_user_by_client_id(session, patient_client_id)
+
+    if not clinician or not patient:
+        return {"error": "user_not_found"}
+
+    if not clinician_can_access_patient(session, clinician, patient):
+        return {"error": "not_authorised"}
+
+    notes = session.exec(
+        select(ClinicalNote)
+        .where(ClinicalNote.patient_id == patient.id)
+        .order_by(ClinicalNote.created_at.desc())
+    ).all()
+
+    return {
+        "patient_client_id": patient_client_id,
+        "notes": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "note": n.note,
+                "created_at": n.created_at.isoformat() + "Z",
+            }
+            for n in notes
+        ],
+    }
+
+# --- Clinician: create a note for a patient (permission-checked) ---
+@app.post("/clinician/patient/notes")
+def clinician_create_note(
+    clinician_client_id: str,
+    patient_client_id: str,
+    title: str,
+    note: str,
+    session: Session = Depends(get_session),
+):
+    clinician = get_user_by_client_id(session, clinician_client_id)
+    patient = get_user_by_client_id(session, patient_client_id)
+
+    if not clinician or not patient:
+        return {"error": "user_not_found"}
+
+    if not clinician_can_access_patient(session, clinician, patient):
+        return {"error": "not_authorised"}
+
+    n = ClinicalNote(
+        clinician_id=clinician.id,
+        patient_id=patient.id,
+        title=title.strip() if title.strip() else "Clinical Note",
+        note=note.strip(),
+    )
+    session.add(n)
+    session.commit()
+    session.refresh(n)
+
+    return {
+        "ok": True,
+        "note": {
+            "id": n.id,
+            "title": n.title,
+            "note": n.note,
+            "created_at": n.created_at.isoformat() + "Z",
+        },
     }
 
 # --- Storage paths ---
@@ -232,14 +315,6 @@ def get_client_history(client_id: str):
         history = json.load(f)
 
     return {"client_id": client_id, "history": history}
-
-@app.get("/me/role")
-def me_role(client_id: str, session: Session = Depends(get_session)):
-    user = session.exec(select(User).where(User.email == f"{client_id}@local")).first()
-    if not user:
-        return {"role": "patient"}  # default
-    return {"role": user.role}
-
 
 # --- Startup: create DB tables ---
 @app.on_event("startup")
