@@ -7,6 +7,7 @@ import os
 import shutil
 import json
 import traceback
+import app.models_clinician
 
 from sqlmodel import Session, select
 
