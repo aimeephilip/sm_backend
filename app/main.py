@@ -10,27 +10,28 @@ import traceback
 
 from sqlmodel import Session, select
 
-from app.services.processor import process_video  # your existing processing function
+from app.services.processor import process_video
 
 from app.db import create_db_and_tables, get_session
-import app.models  # important: registers your SQLModel tables
+import app.models  # registers SQLModel tables
 from app.models import User
+from app.utils.users import get_or_create_user  # NEW
 
 app = FastAPI(
     title="StretchMasters Backend",
     version="0.1.1",
 )
 
-# --- CORS (testing-friendly; tighten later) ---
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # e.g., ["https://your-app.com"] in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Simple root + health endpoints ---
+# --- Root & health ---
 @app.get("/", include_in_schema=False)
 def root():
     return {"status": "ok", "service": "sm-backend"}
@@ -39,13 +40,13 @@ def root():
 def health():
     return {"ok": True}
 
-# --- TEMP Debug endpoint to confirm Postgres connection ---
+# --- TEMP Debug endpoint ---
 @app.get("/debug/db", include_in_schema=False)
 def debug_db(session: Session = Depends(get_session)):
     users = session.exec(select(User)).all()
     return {"ok": True, "user_count": len(users)}
 
-# --- Storage paths (make sure they exist) ---
+# --- Storage paths ---
 UPLOAD_DIR = os.path.join("app", "static", "processed")
 HISTORY_DIR = os.path.join("app", "static", "history")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -68,10 +69,14 @@ async def upload_video(
     movement_type: str = Form(...),
     side: str = Form("left"),
     client_id: str = Form(...),
-    session_id: str = Form(None),               # optional
-    compute_symmetry: str = Form("true"),       # optional (string -> bool)
+    session_id: str = Form(None),
+    compute_symmetry: str = Form("true"),
+    db: Session = Depends(get_session),  # NEW
 ):
-    # create a unique folder for this upload
+    # ✅ Ensure user exists in Postgres (non-destructive)
+    get_or_create_user(db, client_id)
+
+    # create unique folder for this upload
     ext = os.path.splitext(file.filename or "video.mp4")[1]
     file_id = str(uuid.uuid4())
     upload_dir = os.path.join(UPLOAD_DIR, client_id, file_id)
@@ -82,25 +87,22 @@ async def upload_video(
     with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # quick sanity log so you can see it in Render logs
     try:
         size = os.path.getsize(original_path)
     except Exception:
         size = -1
     print(f"DEBUG saved video: {original_path} size={size} bytes")
 
-    # process video with your pipeline
     try:
         result = process_video(
             original_path,
             movement_type,
             side,
             client_id,
-            session_id=session_id,  # accepted by processor.py (currently unused)
-            compute_symmetry=_parse_bool(compute_symmetry, default=True),  # accepted (unused)
+            session_id=session_id,
+            compute_symmetry=_parse_bool(compute_symmetry, default=True),
         )
     except Exception as e:
-        # Log full traceback for debugging in Render -> Logs
         print("UPLOAD ERROR:", e)
         print(traceback.format_exc())
         return JSONResponse(
@@ -108,16 +110,16 @@ async def upload_video(
             content={"error": "processing_failed", "detail": str(e)},
         )
 
-    result["folder"] = upload_dir  # optional for frontend debugging
-    print("DEBUG upload response:", result)  # shows max_angle etc. in Render logs
+    result["folder"] = upload_dir
+    print("DEBUG upload response:", result)
 
     return {
         "message": "Upload and processing successful",
         "file_id": file_id,
-        "results": result,   # Flutter reads results.max_angle
+        "results": result,
     }
 
-# --- Fetch history for a client ---
+# --- Fetch history (JSON-based, unchanged) ---
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str):
     history_file = os.path.join(HISTORY_DIR, f"{client_id}.json")
@@ -134,7 +136,7 @@ def get_client_history(client_id: str):
 async def _init_db():
     create_db_and_tables()
 
-# --- Debug: print routes at startup so we can see them in Render logs ---
+# --- Debug: list routes ---
 @app.on_event("startup")
 async def _log_routes():
     print("=== ROUTES ===")
