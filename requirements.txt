@@ -3,7 +3,8 @@ uvicorn[standard]
 python-multipart
 numpy
 opencv-python-headless
-mediapipe
+mediapipe==0.10.31
+protobuf>=4.25.3,<5
 requests
 sqlmodel==0.0.22
 SQLAlchemy==2.0.36
