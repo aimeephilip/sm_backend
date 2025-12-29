@@ -1,5 +1,5 @@
 # app/main.py
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uuid
@@ -8,7 +8,13 @@ import shutil
 import json
 import traceback
 
+from sqlmodel import Session, select
+
 from app.services.processor import process_video  # your existing processing function
+
+from app.db import create_db_and_tables, get_session
+import app.models  # important: registers your SQLModel tables
+from app.models import User
 
 app = FastAPI(
     title="StretchMasters Backend",
@@ -32,6 +38,12 @@ def root():
 @app.get("/health", include_in_schema=False)
 def health():
     return {"ok": True}
+
+# --- TEMP Debug endpoint to confirm Postgres connection ---
+@app.get("/debug/db", include_in_schema=False)
+def debug_db(session: Session = Depends(get_session)):
+    users = session.exec(select(User)).all()
+    return {"ok": True, "user_count": len(users)}
 
 # --- Storage paths (make sure they exist) ---
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -116,6 +128,11 @@ def get_client_history(client_id: str):
         history = json.load(f)
 
     return {"client_id": client_id, "history": history}
+
+# --- Startup: create DB tables ---
+@app.on_event("startup")
+async def _init_db():
+    create_db_and_tables()
 
 # --- Debug: print routes at startup so we can see them in Render logs ---
 @app.on_event("startup")
