@@ -2,7 +2,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import app.models_movement
 import uuid
 import os
 import shutil
@@ -14,9 +13,12 @@ from sqlmodel import Session, select
 from app.services.processor import process_video
 
 from app.db import create_db_and_tables, get_session
-import app.models  # registers SQLModel tables
+import app.models                      # registers User table
+import app.models_movement             # registers MovementResult table
 from app.models import User
-from app.utils.users import get_or_create_user  # NEW
+
+from app.utils.users import get_or_create_user
+from app.utils.results import save_result   # ✅ THIS WAS MISSING
 
 app = FastAPI(
     title="StretchMasters Backend",
@@ -41,11 +43,18 @@ def root():
 def health():
     return {"ok": True}
 
-# --- TEMP Debug endpoint ---
+# --- TEMP Debug endpoint: users ---
 @app.get("/debug/db", include_in_schema=False)
 def debug_db(session: Session = Depends(get_session)):
     users = session.exec(select(User)).all()
     return {"ok": True, "user_count": len(users)}
+
+# --- TEMP Debug endpoint: results ---
+@app.get("/debug/results", include_in_schema=False)
+def debug_results(session: Session = Depends(get_session)):
+    from app.models_movement import MovementResult
+    rows = session.exec(select(MovementResult)).all()
+    return {"count": len(rows)}
 
 # --- Storage paths ---
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -72,18 +81,18 @@ async def upload_video(
     client_id: str = Form(...),
     session_id: str = Form(None),
     compute_symmetry: str = Form("true"),
-    db: Session = Depends(get_session),  # NEW
+    db: Session = Depends(get_session),
 ):
-    # ✅ Ensure user exists in Postgres (non-destructive)
-    get_or_create_user(db, client_id)
+    # ✅ Ensure user exists (Postgres)
+    user = get_or_create_user(db, client_id)
 
-    # create unique folder for this upload
+    # Create unique folder
     ext = os.path.splitext(file.filename or "video.mp4")[1]
     file_id = str(uuid.uuid4())
     upload_dir = os.path.join(UPLOAD_DIR, client_id, file_id)
     os.makedirs(upload_dir, exist_ok=True)
 
-    # save original video
+    # Save original video
     original_path = os.path.join(upload_dir, f"original{ext}")
     with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -94,6 +103,7 @@ async def upload_video(
         size = -1
     print(f"DEBUG saved video: {original_path} size={size} bytes")
 
+    # Process video
     try:
         result = process_video(
             original_path,
@@ -110,6 +120,19 @@ async def upload_video(
             status_code=500,
             content={"error": "processing_failed", "detail": str(e)},
         )
+
+    # ✅ Save movement result to Postgres
+    save_result(
+        db,
+        user,
+        {
+            "movement": movement_type,
+            "side": side,
+            "min_angle": result.get("min_angle"),
+            "max_angle": result.get("max_angle"),
+            "rom": result.get("rom"),
+        },
+    )
 
     result["folder"] = upload_dir
     print("DEBUG upload response:", result)
