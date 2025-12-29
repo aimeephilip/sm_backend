@@ -7,19 +7,22 @@ import os
 import shutil
 import json
 import traceback
-import app.models_clinician
 
 from sqlmodel import Session, select
 
 from app.services.processor import process_video
 
 from app.db import create_db_and_tables, get_session
-import app.models                      # registers User table
-import app.models_movement             # registers MovementResult table
-from app.models import User
 
+# Register SQLModel tables (important: these imports ensure tables get created)
+import app.models
+import app.models_movement
+import app.models_clinician
+
+from app.models import User
 from app.utils.users import get_or_create_user
-from app.utils.results import save_result   # ✅ THIS WAS MISSING
+from app.utils.results import save_result
+
 
 app = FastAPI(
     title="StretchMasters Backend",
@@ -29,7 +32,7 @@ app = FastAPI(
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # tighten later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +59,79 @@ def debug_results(session: Session = Depends(get_session)):
     from app.models_movement import MovementResult
     rows = session.exec(select(MovementResult)).all()
     return {"count": len(rows)}
+
+# --- TEMP Debug endpoint: promote a user to clinician (by client_id) ---
+@app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
+def make_clinician(client_id: str, session: Session = Depends(get_session)):
+    fake_email = f"{client_id}@local"
+    user = session.exec(select(User).where(User.email == fake_email)).first()
+    if not user:
+        return {"error": "user_not_found"}
+
+    user.role = "clinician"
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return {"ok": True, "user_id": user.id, "role": user.role}
+
+# --- TEMP Debug endpoint: assign patient to clinician (by client_id) ---
+@app.post("/debug/assign_patient", include_in_schema=False)
+def assign_patient(
+    clinician_client_id: str,
+    patient_client_id: str,
+    session: Session = Depends(get_session),
+):
+    from app.models_clinician import ClinicianPatient
+
+    clinician = session.exec(
+        select(User).where(User.email == f"{clinician_client_id}@local")
+    ).first()
+    patient = session.exec(
+        select(User).where(User.email == f"{patient_client_id}@local")
+    ).first()
+
+    if not clinician or not patient:
+        return {"error": "user_not_found"}
+
+    if clinician.role != "clinician":
+        return {"error": "not_a_clinician"}
+
+    link = ClinicianPatient(clinician_id=clinician.id, patient_id=patient.id)
+    session.add(link)
+    session.commit()
+
+    return {"ok": True}
+
+# --- Clinician endpoint: list assigned patients ---
+@app.get("/clinician/patients")
+def clinician_patients(
+    clinician_client_id: str,
+    session: Session = Depends(get_session),
+):
+    from app.models_clinician import ClinicianPatient
+
+    clinician = session.exec(
+        select(User).where(User.email == f"{clinician_client_id}@local")
+    ).first()
+
+    if not clinician or clinician.role != "clinician":
+        return {"error": "not_authorised"}
+
+    links = session.exec(
+        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician.id)
+    ).all()
+    patient_ids = [l.patient_id for l in links]
+
+    if not patient_ids:
+        return {"clinician": clinician.email, "patients": []}
+
+    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
+
+    return {
+        "clinician": clinician.email,
+        "patients": [{"id": p.id, "email": p.email} for p in patients],
+    }
 
 # --- Storage paths ---
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -84,7 +160,7 @@ async def upload_video(
     compute_symmetry: str = Form("true"),
     db: Session = Depends(get_session),
 ):
-    # ✅ Ensure user exists (Postgres)
+    # Ensure user exists (Postgres)
     user = get_or_create_user(db, client_id)
 
     # Create unique folder
@@ -122,7 +198,7 @@ async def upload_video(
             content={"error": "processing_failed", "detail": str(e)},
         )
 
-    # ✅ Save movement result to Postgres
+    # Save movement result to Postgres
     save_result(
         db,
         user,
@@ -143,23 +219,6 @@ async def upload_video(
         "file_id": file_id,
         "results": result,
     }
-
-@app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
-def make_clinician(client_id: str, session: Session = Depends(get_session)):
-    fake_email = f"{client_id}@local"
-    user = session.exec(
-        select(User).where(User.email == fake_email)
-    ).first()
-
-    if not user:
-        return {"error": "user_not_found"}
-
-    user.role = "clinician"
-    session.add(user)
-    session.commit()
-
-    return {"ok": True, "user_id": user.id, "role": user.role}
-
 
 # --- Fetch history (JSON-based, unchanged) ---
 @app.get("/history/{client_id}")
