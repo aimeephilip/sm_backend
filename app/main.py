@@ -304,6 +304,35 @@ async def upload_video(
         "results": result,
     }
 
+@app.get("/patient/notes")
+def patient_list_notes(
+    client_id: str,
+    session: Session = Depends(get_session),
+):
+    patient = get_user_by_client_id(session, client_id)
+    if not patient:
+        return {"error": "user_not_found"}
+
+    notes = session.exec(
+        select(ClinicalNote)
+        .where(ClinicalNote.patient_id == patient.id)
+        .order_by(ClinicalNote.created_at.desc())
+    ).all()
+
+    return {
+        "client_id": client_id,
+        "notes": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "note": n.note,
+                "created_at": n.created_at.isoformat() + "Z",
+            }
+            for n in notes
+        ],
+    }
+
+
 # --- Fetch history (JSON-based, unchanged) ---
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str):
