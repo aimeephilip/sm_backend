@@ -61,7 +61,6 @@ def health():
 
 # -------------------------------------------------------------------
 # Firebase: profile + role (NEW)
-# These are the endpoints your Flutter app should move to next.
 # -------------------------------------------------------------------
 
 @app.get("/me")
@@ -98,7 +97,6 @@ def update_profile(
     prof = ensure_profile(session, uid, email)
     prof.full_name = full_name.strip()
 
-    # simple updated_at
     from datetime import datetime
     prof.updated_at = datetime.utcnow()
 
@@ -116,8 +114,8 @@ def me_role(
     """
     Backwards-compatible endpoint.
 
-    - If your Flutter still calls /me/role?client_id=XYZ, this will return role based on User table.
-    - Once Flutter uses Firebase, you should switch to calling GET /me and read role from there.
+    - If Flutter still calls /me/role?client_id=XYZ, this returns role from User table.
+    - Once Flutter is fully Firebase-auth, read role from GET /me instead.
     """
     if not client_id:
         return {"role": "patient"}
@@ -185,64 +183,84 @@ def assign_patient(
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Clinician: list assigned patients (CURRENT FLOW)
+# Clinician: list assigned patients (TOKEN ONLY)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients")
 def clinician_patients(
-    clinician_client_id: str,
+    claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
     """
-    Current Flutter uses clinician_client_id query param.
-    Later we will switch this to Firebase token-only.
+    Token-based clinician list. No spoofable clinician_client_id query param.
     """
     from app.models_clinician import ClinicianPatient
 
-    clinician = session.exec(select(User).where(User.email == clinician_client_id)).first()
-    if not clinician or clinician.role != "clinician":
+    uid = claims.get("uid")
+    email = claims.get("email")
+    if not uid or not email:
+        return {"error": "missing_claims"}
+
+    prof = ensure_profile(session, uid, email)
+    if prof.role != "clinician":
         return {"error": "not_authorised"}
 
+    # Bridge: your ClinicianPatient table links to app.models.User ids.
+    # Ensure there's a matching User row for this clinician email.
+    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
+    if not clinician_user:
+        clinician_user = get_or_create_user(session, prof.email)
+        clinician_user.role = "clinician"
+        session.add(clinician_user)
+        session.commit()
+        session.refresh(clinician_user)
+
     links = session.exec(
-        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician.id)
+        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
     ).all()
     patient_ids = [l.patient_id for l in links]
 
     if not patient_ids:
-        return {"clinician": clinician.email, "patients": []}
+        return {"clinician": prof.email, "patients": []}
 
     patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
 
     return {
-        "clinician": clinician.email,
-        "patients": [
-            {"id": p.id, "client_id": p.email}
-            for p in patients
-        ],
+        "clinician": prof.email,
+        "patients": [{"id": p.id, "client_id": p.email} for p in patients],
     }
 
 # -------------------------------------------------------------------
-# Clinician: notes (list + create)
+# Clinician: notes (list + create) (TOKEN ONLY)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patient/notes")
 def clinician_list_notes(
-    clinician_client_id: str,
     patient_client_id: str,
+    claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
-    clinician = get_user_by_client_id(session, clinician_client_id)
-    patient = get_user_by_client_id(session, patient_client_id)
+    uid = claims.get("uid")
+    email = claims.get("email")
+    if not uid or not email:
+        return {"error": "missing_claims"}
 
-    if not clinician or not patient:
+    prof = ensure_profile(session, uid, email)
+    if prof.role != "clinician":
+        return {"error": "not_authorised"}
+
+    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+
+    if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
 
-    if not clinician_can_access_patient(session, clinician, patient):
+    if not clinician_can_access_patient(session, clinician_user, patient_user):
         return {"error": "not_authorised"}
 
     notes = session.exec(
         select(ClinicalNote)
-        .where(ClinicalNote.patient_id == patient.id)
+        .where(ClinicalNote.patient_id == patient_user.id)
         .order_by(ClinicalNote.created_at.desc())
     ).all()
 
@@ -261,24 +279,33 @@ def clinician_list_notes(
 
 @app.post("/clinician/patient/notes")
 def clinician_create_note(
-    clinician_client_id: str,
     patient_client_id: str,
     title: str,
     note: str,
+    claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
-    clinician = get_user_by_client_id(session, clinician_client_id)
-    patient = get_user_by_client_id(session, patient_client_id)
+    uid = claims.get("uid")
+    email = claims.get("email")
+    if not uid or not email:
+        return {"error": "missing_claims"}
 
-    if not clinician or not patient:
+    prof = ensure_profile(session, uid, email)
+    if prof.role != "clinician":
+        return {"error": "not_authorised"}
+
+    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+
+    if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
 
-    if not clinician_can_access_patient(session, clinician, patient):
+    if not clinician_can_access_patient(session, clinician_user, patient_user):
         return {"error": "not_authorised"}
 
     n = ClinicalNote(
-        clinician_id=clinician.id,
-        patient_id=patient.id,
+        clinician_id=clinician_user.id,
+        patient_id=patient_user.id,
         title=title.strip() or "Clinical Note",
         note=note.strip(),
     )
@@ -297,7 +324,7 @@ def clinician_create_note(
     }
 
 # -------------------------------------------------------------------
-# Upload & process video (CURRENT FLOW)
+# Upload & process video (CURRENT FLOW - still client_id form field)
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -374,7 +401,7 @@ async def upload_video(
     }
 
 # -------------------------------------------------------------------
-# Patient notes (read-only)
+# Patient notes (read-only) - still legacy client_id param
 # -------------------------------------------------------------------
 
 @app.get("/patient/notes")
