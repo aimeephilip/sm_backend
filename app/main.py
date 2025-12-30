@@ -139,10 +139,22 @@ def clinician_patients(
 
     patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
 
-    return {
-        "clinician": clinician.email,
-        "patients": [{"id": p.id, "email": p.email} for p in patients],
-    }
+    def _client_id_from_email(email: str) -> str:
+    if email.endswith("@local"):
+        return email.replace("@local", "")
+    return email
+
+return {
+    "clinician": _client_id_from_email(clinician.email),
+    "patients": [
+        {
+            "id": p.id,
+            "client_id": _client_id_from_email(p.email),
+        }
+        for p in patients
+    ],
+}
+
 
 # --- Clinician: list notes for a patient (permission-checked) ---
 @app.get("/clinician/patient/notes")
