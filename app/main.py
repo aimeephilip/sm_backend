@@ -13,13 +13,16 @@ from sqlmodel import Session, select
 from app.services.processor import process_video
 from app.db import create_db_and_tables, get_session
 
-# --- Register SQLModel tables ---
+# --- Firebase profile endpoints (safe to include even if Flutter not using yet) ---
+from app.utils.auth import get_firebase_claims
+from app.utils.profile import ensure_profile
+
+# --- Register SQLModel tables (imports ensure tables are created) ---
 import app.models                      # User
 import app.models_movement             # MovementResult
 import app.models_clinician            # ClinicianPatient
 import app.models_notes                # ClinicalNote
-import app.models_profile
-
+import app.models_profile              # UserProfile (your new table)
 
 from app.models import User
 from app.models_notes import ClinicalNote
@@ -38,7 +41,7 @@ app = FastAPI(
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # tighten later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,20 +60,75 @@ def health():
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Role lookup (Flutter EntryGate)
+# Firebase: profile + role (NEW)
+# These are the endpoints your Flutter app should move to next.
 # -------------------------------------------------------------------
 
+@app.get("/me")
+def me(
+    claims=Depends(get_firebase_claims),
+    session: Session = Depends(get_session),
+):
+    uid = claims.get("uid")
+    email = claims.get("email")
+    if not uid or not email:
+        return {"error": "missing_claims"}
+
+    prof = ensure_profile(session, uid, email)
+
+    return {
+        "uid": prof.firebase_uid,
+        "email": prof.email,
+        "full_name": prof.full_name,
+        "role": prof.role,
+        "needs_profile": (prof.full_name.strip() == ""),
+    }
+
+@app.post("/me/profile")
+def update_profile(
+    full_name: str,
+    claims=Depends(get_firebase_claims),
+    session: Session = Depends(get_session),
+):
+    uid = claims.get("uid")
+    email = claims.get("email")
+    if not uid or not email:
+        return {"error": "missing_claims"}
+
+    prof = ensure_profile(session, uid, email)
+    prof.full_name = full_name.strip()
+
+    # simple updated_at
+    from datetime import datetime
+    prof.updated_at = datetime.utcnow()
+
+    session.add(prof)
+    session.commit()
+    session.refresh(prof)
+
+    return {"ok": True, "full_name": prof.full_name}
+
 @app.get("/me/role")
-def me_role(client_id: str, session: Session = Depends(get_session)):
-    user = session.exec(
-        select(User).where(User.email == f"{client_id}@local")
-    ).first()
+def me_role(
+    client_id: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """
+    Backwards-compatible endpoint.
+
+    - If your Flutter still calls /me/role?client_id=XYZ, this will return role based on User table.
+    - Once Flutter uses Firebase, you should switch to calling GET /me and read role from there.
+    """
+    if not client_id:
+        return {"role": "patient"}
+
+    user = session.exec(select(User).where(User.email == client_id)).first()
     if not user:
         return {"role": "patient"}
     return {"role": user.role}
 
 # -------------------------------------------------------------------
-# DEBUG
+# DEBUG (Keep for now, remove/lock down before launch)
 # -------------------------------------------------------------------
 
 @app.get("/debug/db", include_in_schema=False)
@@ -86,9 +144,10 @@ def debug_results(session: Session = Depends(get_session)):
 
 @app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
 def make_clinician(client_id: str, session: Session = Depends(get_session)):
-    user = session.exec(
-        select(User).where(User.email == f"{client_id}@local")
-    ).first()
+    """
+    Promotes an existing User (by email/client_id) to clinician.
+    """
+    user = session.exec(select(User).where(User.email == client_id)).first()
     if not user:
         return {"error": "user_not_found"}
 
@@ -105,14 +164,13 @@ def assign_patient(
     patient_client_id: str,
     session: Session = Depends(get_session),
 ):
+    """
+    Links clinician -> patient using your existing User table.
+    """
     from app.models_clinician import ClinicianPatient
 
-    clinician = session.exec(
-        select(User).where(User.email == f"{clinician_client_id}@local")
-    ).first()
-    patient = session.exec(
-        select(User).where(User.email == f"{patient_client_id}@local")
-    ).first()
+    clinician = session.exec(select(User).where(User.email == clinician_client_id)).first()
+    patient = session.exec(select(User).where(User.email == patient_client_id)).first()
 
     if not clinician or not patient:
         return {"error": "user_not_found"}
@@ -120,17 +178,14 @@ def assign_patient(
     if clinician.role != "clinician":
         return {"error": "not_a_clinician"}
 
-    link = ClinicianPatient(
-        clinician_id=clinician.id,
-        patient_id=patient.id,
-    )
+    link = ClinicianPatient(clinician_id=clinician.id, patient_id=patient.id)
     session.add(link)
     session.commit()
 
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Clinician: list assigned patients
+# Clinician: list assigned patients (CURRENT FLOW)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients")
@@ -138,45 +193,30 @@ def clinician_patients(
     clinician_client_id: str,
     session: Session = Depends(get_session),
 ):
+    """
+    Current Flutter uses clinician_client_id query param.
+    Later we will switch this to Firebase token-only.
+    """
     from app.models_clinician import ClinicianPatient
 
-    def client_id_from_email(email: str) -> str:
-        if email.endswith("@local"):
-            return email[:-6]
-        return email.split("@")[0]
-
-    clinician = session.exec(
-        select(User).where(User.email == f"{clinician_client_id}@local")
-    ).first()
-
+    clinician = session.exec(select(User).where(User.email == clinician_client_id)).first()
     if not clinician or clinician.role != "clinician":
         return {"error": "not_authorised"}
 
     links = session.exec(
-        select(ClinicianPatient).where(
-            ClinicianPatient.clinician_id == clinician.id
-        )
+        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician.id)
     ).all()
-
     patient_ids = [l.patient_id for l in links]
 
     if not patient_ids:
-        return {
-            "clinician": client_id_from_email(clinician.email),
-            "patients": [],
-        }
+        return {"clinician": clinician.email, "patients": []}
 
-    patients = session.exec(
-        select(User).where(User.id.in_(patient_ids))
-    ).all()
+    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
 
     return {
-        "clinician": client_id_from_email(clinician.email),
+        "clinician": clinician.email,
         "patients": [
-            {
-                "id": p.id,
-                "client_id": client_id_from_email(p.email),
-            }
+            {"id": p.id, "client_id": p.email}
             for p in patients
         ],
     }
@@ -257,7 +297,7 @@ def clinician_create_note(
     }
 
 # -------------------------------------------------------------------
-# Upload & process video
+# Upload & process video (CURRENT FLOW)
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -268,7 +308,12 @@ os.makedirs(HISTORY_DIR, exist_ok=True)
 def _parse_bool(value: str, default: bool = True) -> bool:
     if value is None:
         return default
-    return value.lower() in ("1", "true", "yes", "on")
+    v = value.strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
 
 @app.post("/upload/")
 async def upload_video(
@@ -280,6 +325,7 @@ async def upload_video(
     compute_symmetry: str = Form("true"),
     db: Session = Depends(get_session),
 ):
+    # Ensure user exists (legacy client_id flow)
     user = get_or_create_user(db, client_id)
 
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -298,16 +344,17 @@ async def upload_video(
             side,
             client_id,
             session_id=session_id,
-            compute_symmetry=_parse_bool(compute_symmetry),
+            compute_symmetry=_parse_bool(compute_symmetry, default=True),
         )
     except Exception as e:
         print("UPLOAD ERROR:", e)
         print(traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={"error": "processing_failed"},
+            content={"error": "processing_failed", "detail": str(e)},
         )
 
+    # Save movement result to Postgres
     save_result(
         db,
         user,
