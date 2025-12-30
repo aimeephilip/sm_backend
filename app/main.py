@@ -18,6 +18,8 @@ import app.models                      # User
 import app.models_movement             # MovementResult
 import app.models_clinician            # ClinicianPatient
 import app.models_notes                # ClinicalNote
+import app.models_profile
+
 
 from app.models import User
 from app.models_notes import ClinicalNote
