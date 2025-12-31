@@ -663,3 +663,39 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
 async def startup():
     create_db_and_tables()
     threading.Thread(target=_warmup_mediapipe, daemon=True).start()
+
+from fastapi import Body
+from datetime import datetime
+from sqlmodel import select
+from app.models import User
+from app.models_movement import MovementResult
+from app.utils.users import get_or_create_user
+
+@app.post("/symmetry/save")
+def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_session)):
+    client_id = (payload.get("client_id") or "").strip().lower()
+    movement = (payload.get("movement") or "").strip().lower()
+    symmetry = payload.get("symmetry", None)
+
+    right_max = payload.get("right_max", None)
+    left_max = payload.get("left_max", None)
+
+    if not client_id or not movement or symmetry is None:
+        return JSONResponse(status_code=400, content={"error": "missing_fields"})
+
+    user = get_or_create_user(session, client_id)
+
+    row = MovementResult(
+        user_id=user.id,
+        movement=f"symmetry_{movement}",
+        side="both",
+        min_angle=None,
+        max_angle=float(symmetry),
+        rom=None,
+    )
+    if hasattr(row, "created_at"):
+        row.created_at = datetime.utcnow()
+
+    session.add(row)
+    session.commit()
+    return {"ok": True}
