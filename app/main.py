@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from app.services.processor import process_video
 from app.db import create_db_and_tables, get_session
 
-# --- Firebase profile endpoints (safe to include even if Flutter not using yet) ---
+# --- Firebase profile endpoints (kept, even if Flutter not using right now) ---
 from app.utils.auth import get_firebase_claims
 from app.utils.profile import ensure_profile
 
@@ -22,7 +22,7 @@ import app.models                      # User
 import app.models_movement             # MovementResult
 import app.models_clinician            # ClinicianPatient
 import app.models_notes                # ClinicalNote
-import app.models_profile              # UserProfile (your new table)
+import app.models_profile              # UserProfile
 
 from app.models import User
 from app.models_notes import ClinicalNote
@@ -60,7 +60,7 @@ def health():
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Firebase: profile + role (NEW)
+# Firebase: profile + role (kept)
 # -------------------------------------------------------------------
 
 @app.get("/me")
@@ -114,8 +114,8 @@ def me_role(
     """
     Backwards-compatible endpoint.
 
-    - If Flutter still calls /me/role?client_id=XYZ, this returns role from User table.
-    - Once Flutter is fully Firebase-auth, read role from GET /me instead.
+    - If Flutter calls /me/role?client_id=XYZ, this returns role from User table.
+    - If no client_id, defaults to patient.
     """
     if not client_id:
         return {"role": "patient"}
@@ -126,7 +126,7 @@ def me_role(
     return {"role": user.role}
 
 # -------------------------------------------------------------------
-# DEBUG (Keep for now, remove/lock down before launch)
+# DEBUG (keep for now)
 # -------------------------------------------------------------------
 
 @app.get("/debug/db", include_in_schema=False)
@@ -183,7 +183,7 @@ def assign_patient(
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Clinician: list assigned patients (TOKEN ONLY)
+# Clinician: TOKEN ONLY (kept)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients")
@@ -192,7 +192,7 @@ def clinician_patients(
     session: Session = Depends(get_session),
 ):
     """
-    Token-based clinician list. No spoofable clinician_client_id query param.
+    Token-based clinician list.
     """
     from app.models_clinician import ClinicianPatient
 
@@ -205,8 +205,6 @@ def clinician_patients(
     if prof.role != "clinician":
         return {"error": "not_authorised"}
 
-    # Bridge: your ClinicianPatient table links to app.models.User ids.
-    # Ensure there's a matching User row for this clinician email.
     clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
     if not clinician_user:
         clinician_user = get_or_create_user(session, prof.email)
@@ -229,10 +227,6 @@ def clinician_patients(
         "clinician": prof.email,
         "patients": [{"id": p.id, "client_id": p.email} for p in patients],
     }
-
-# -------------------------------------------------------------------
-# Clinician: notes (list + create) (TOKEN ONLY)
-# -------------------------------------------------------------------
 
 @app.get("/clinician/patient/notes")
 def clinician_list_notes(
@@ -324,13 +318,115 @@ def clinician_create_note(
     }
 
 # -------------------------------------------------------------------
-# Upload & process video (CURRENT FLOW - still client_id form field)
+# Clinician: LEGACY client_id-based (RESTORES clinician without Firebase)
+# -------------------------------------------------------------------
+
+@app.get("/clinician/patients_legacy")
+def clinician_patients_legacy(
+    clinician_client_id: str,
+    session: Session = Depends(get_session),
+):
+    from app.models_clinician import ClinicianPatient
+
+    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
+    if not clinician_user:
+        return {"error": "user_not_found"}
+    if clinician_user.role != "clinician":
+        return {"error": "not_authorised"}
+
+    links = session.exec(
+        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
+    ).all()
+    patient_ids = [l.patient_id for l in links]
+
+    if not patient_ids:
+        return {"clinician": clinician_user.email, "patients": []}
+
+    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
+    return {
+        "clinician": clinician_user.email,
+        "patients": [{"id": p.id, "client_id": p.email} for p in patients],
+    }
+
+@app.get("/clinician/patient/notes_legacy")
+def clinician_list_notes_legacy(
+    clinician_client_id: str,
+    patient_client_id: str,
+    session: Session = Depends(get_session),
+):
+    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+
+    if not clinician_user or not patient_user:
+        return {"error": "user_not_found"}
+    if clinician_user.role != "clinician":
+        return {"error": "not_authorised"}
+    if not clinician_can_access_patient(session, clinician_user, patient_user):
+        return {"error": "not_authorised"}
+
+    notes = session.exec(
+        select(ClinicalNote)
+        .where(ClinicalNote.patient_id == patient_user.id)
+        .order_by(ClinicalNote.created_at.desc())
+    ).all()
+
+    return {
+        "patient_client_id": patient_client_id,
+        "notes": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "note": n.note,
+                "created_at": n.created_at.isoformat() + "Z",
+            }
+            for n in notes
+        ],
+    }
+
+@app.post("/clinician/patient/notes_legacy")
+def clinician_create_note_legacy(
+    clinician_client_id: str,
+    patient_client_id: str,
+    title: str,
+    note: str,
+    session: Session = Depends(get_session),
+):
+    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+
+    if not clinician_user or not patient_user:
+        return {"error": "user_not_found"}
+    if clinician_user.role != "clinician":
+        return {"error": "not_authorised"}
+    if not clinician_can_access_patient(session, clinician_user, patient_user):
+        return {"error": "not_authorised"}
+
+    n = ClinicalNote(
+        clinician_id=clinician_user.id,
+        patient_id=patient_user.id,
+        title=title.strip() or "Clinical Note",
+        note=note.strip(),
+    )
+    session.add(n)
+    session.commit()
+    session.refresh(n)
+
+    return {
+        "ok": True,
+        "note": {
+            "id": n.id,
+            "title": n.title,
+            "note": n.note,
+            "created_at": n.created_at.isoformat() + "Z",
+        },
+    }
+
+# -------------------------------------------------------------------
+# Upload & process video (client_id form field)
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
-HISTORY_DIR = os.path.join("app", "static", "history")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(HISTORY_DIR, exist_ok=True)
 
 def _parse_bool(value: str, default: bool = True) -> bool:
     if value is None:
@@ -352,7 +448,6 @@ async def upload_video(
     compute_symmetry: str = Form("true"),
     db: Session = Depends(get_session),
 ):
-    # Ensure user exists (legacy client_id flow)
     user = get_or_create_user(db, client_id)
 
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -381,7 +476,6 @@ async def upload_video(
             content={"error": "processing_failed", "detail": str(e)},
         )
 
-    # Save movement result to Postgres
     save_result(
         db,
         user,
@@ -401,7 +495,7 @@ async def upload_video(
     }
 
 # -------------------------------------------------------------------
-# Patient notes (read-only) - still legacy client_id param
+# Patient notes (legacy client_id param)
 # -------------------------------------------------------------------
 
 @app.get("/patient/notes")
@@ -433,17 +527,36 @@ def patient_list_notes(
     }
 
 # -------------------------------------------------------------------
-# History (legacy JSON)
+# History (FIXED: pull from Postgres, not legacy JSON file)
 # -------------------------------------------------------------------
 
 @app.get("/history/{client_id}")
-def get_client_history(client_id: str):
-    history_file = os.path.join(HISTORY_DIR, f"{client_id}.json")
-    if not os.path.exists(history_file):
+def get_client_history(
+    client_id: str,
+    session: Session = Depends(get_session),
+):
+    from app.models_movement import MovementResult
+
+    user = session.exec(select(User).where(User.email == client_id)).first()
+    if not user:
         return JSONResponse(status_code=404, content={"message": "Client not found"})
 
-    with open(history_file, "r") as f:
-        history = json.load(f)
+    rows = session.exec(
+        select(MovementResult)
+        .where(MovementResult.user_id == user.id)
+        .order_by(MovementResult.created_at.asc())
+    ).all()
+
+    history = []
+    for r in rows:
+        history.append({
+            "movement": getattr(r, "movement", None),
+            "side": getattr(r, "side", None),
+            "max_angle": getattr(r, "max_angle", None),
+            "min_angle": getattr(r, "min_angle", None),
+            "rom": getattr(r, "rom", None),
+            "created_at": r.created_at.isoformat() + "Z" if getattr(r, "created_at", None) else None,
+        })
 
     return {"client_id": client_id, "history": history}
 
