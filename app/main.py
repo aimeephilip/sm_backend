@@ -7,13 +7,14 @@ import os
 import shutil
 import json
 import traceback
+from datetime import datetime
 
 from sqlmodel import Session, select
 
 from app.services.processor import process_video
 from app.db import create_db_and_tables, get_session
 
-# --- Firebase profile endpoints (kept, even if Flutter not using right now) ---
+# --- Firebase profile endpoints (kept even if Flutter not using right now) ---
 from app.utils.auth import get_firebase_claims
 from app.utils.profile import ensure_profile
 
@@ -26,8 +27,9 @@ import app.models_profile              # UserProfile
 
 from app.models import User
 from app.models_notes import ClinicalNote
+from app.models_movement import MovementResult
+
 from app.utils.users import get_or_create_user
-from app.utils.results import save_result
 from app.utils.permissions import (
     get_user_by_client_id,
     clinician_can_access_patient,
@@ -46,6 +48,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+
+def norm_client_id(client_id: str) -> str:
+    return (client_id or "").strip().lower()
+
+def _parse_bool(value: str, default: bool = True) -> bool:
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
 
 # -------------------------------------------------------------------
 # Root / Health
@@ -95,9 +114,8 @@ def update_profile(
         return {"error": "missing_claims"}
 
     prof = ensure_profile(session, uid, email)
-    prof.full_name = full_name.strip()
+    prof.full_name = (full_name or "").strip()
 
-    from datetime import datetime
     prof.updated_at = datetime.utcnow()
 
     session.add(prof)
@@ -120,6 +138,7 @@ def me_role(
     if not client_id:
         return {"role": "patient"}
 
+    client_id = norm_client_id(client_id)
     user = session.exec(select(User).where(User.email == client_id)).first()
     if not user:
         return {"role": "patient"}
@@ -136,7 +155,6 @@ def debug_db(session: Session = Depends(get_session)):
 
 @app.get("/debug/results", include_in_schema=False)
 def debug_results(session: Session = Depends(get_session)):
-    from app.models_movement import MovementResult
     rows = session.exec(select(MovementResult)).all()
     return {"count": len(rows)}
 
@@ -145,6 +163,7 @@ def make_clinician(client_id: str, session: Session = Depends(get_session)):
     """
     Promotes an existing User (by email/client_id) to clinician.
     """
+    client_id = norm_client_id(client_id)
     user = session.exec(select(User).where(User.email == client_id)).first()
     if not user:
         return {"error": "user_not_found"}
@@ -166,6 +185,9 @@ def assign_patient(
     Links clinician -> patient using your existing User table.
     """
     from app.models_clinician import ClinicianPatient
+
+    clinician_client_id = norm_client_id(clinician_client_id)
+    patient_client_id = norm_client_id(patient_client_id)
 
     clinician = session.exec(select(User).where(User.email == clinician_client_id)).first()
     patient = session.exec(select(User).where(User.email == patient_client_id)).first()
@@ -234,6 +256,8 @@ def clinician_list_notes(
     claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
+    patient_client_id = norm_client_id(patient_client_id)
+
     uid = claims.get("uid")
     email = claims.get("email")
     if not uid or not email:
@@ -279,6 +303,8 @@ def clinician_create_note(
     claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
+    patient_client_id = norm_client_id(patient_client_id)
+
     uid = claims.get("uid")
     email = claims.get("email")
     if not uid or not email:
@@ -300,8 +326,8 @@ def clinician_create_note(
     n = ClinicalNote(
         clinician_id=clinician_user.id,
         patient_id=patient_user.id,
-        title=title.strip() or "Clinical Note",
-        note=note.strip(),
+        title=(title or "").strip() or "Clinical Note",
+        note=(note or "").strip(),
     )
     session.add(n)
     session.commit()
@@ -327,6 +353,8 @@ def clinician_patients_legacy(
     session: Session = Depends(get_session),
 ):
     from app.models_clinician import ClinicianPatient
+
+    clinician_client_id = norm_client_id(clinician_client_id)
 
     clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
     if not clinician_user:
@@ -354,6 +382,9 @@ def clinician_list_notes_legacy(
     patient_client_id: str,
     session: Session = Depends(get_session),
 ):
+    clinician_client_id = norm_client_id(clinician_client_id)
+    patient_client_id = norm_client_id(patient_client_id)
+
     clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
     patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
 
@@ -391,6 +422,9 @@ def clinician_create_note_legacy(
     note: str,
     session: Session = Depends(get_session),
 ):
+    clinician_client_id = norm_client_id(clinician_client_id)
+    patient_client_id = norm_client_id(patient_client_id)
+
     clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
     patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
 
@@ -404,8 +438,8 @@ def clinician_create_note_legacy(
     n = ClinicalNote(
         clinician_id=clinician_user.id,
         patient_id=patient_user.id,
-        title=title.strip() or "Clinical Note",
-        note=note.strip(),
+        title=(title or "").strip() or "Clinical Note",
+        note=(note or "").strip(),
     )
     session.add(n)
     session.commit()
@@ -422,21 +456,13 @@ def clinician_create_note_legacy(
     }
 
 # -------------------------------------------------------------------
-# Upload & process video (client_id form field)
+# Upload & process video (client_id form field) — NOW SAVES RELIABLY
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
+HISTORY_DIR = os.path.join("app", "static", "history")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-def _parse_bool(value: str, default: bool = True) -> bool:
-    if value is None:
-        return default
-    v = value.strip().lower()
-    if v in ("1", "true", "t", "yes", "y", "on"):
-        return True
-    if v in ("0", "false", "f", "no", "n", "off"):
-        return False
-    return default
+os.makedirs(HISTORY_DIR, exist_ok=True)
 
 @app.post("/upload/")
 async def upload_video(
@@ -448,6 +474,12 @@ async def upload_video(
     compute_symmetry: str = Form("true"),
     db: Session = Depends(get_session),
 ):
+    # ✅ Normalise client_id; prevent "unknown"/blank saves
+    client_id = norm_client_id(client_id)
+    if not client_id:
+        return JSONResponse(status_code=400, content={"error": "missing_client_id"})
+
+    # Ensure user exists
     user = get_or_create_user(db, client_id)
 
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -476,17 +508,32 @@ async def upload_video(
             content={"error": "processing_failed", "detail": str(e)},
         )
 
-    save_result(
-        db,
-        user,
-        {
-            "movement": movement_type,
-            "side": side,
-            "min_angle": result.get("min_angle"),
-            "max_angle": result.get("max_angle"),
-            "rom": result.get("rom"),
-        },
-    )
+    # ✅ HARD SAVE to Postgres (no helper dependency)
+    try:
+        row = MovementResult(
+            user_id=user.id,
+            movement=(movement_type or "").strip().lower(),
+            side=(side or "").strip().lower(),
+            min_angle=result.get("min_angle"),
+            max_angle=result.get("max_angle"),
+            rom=result.get("rom"),
+        )
+        # Set created_at if the model has it
+        if hasattr(row, "created_at"):
+            setattr(row, "created_at", datetime.utcnow())
+
+        db.add(row)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print("DB SAVE ERROR:", e)
+        print(traceback.format_exc())
+        return {
+            "message": "Upload+processing OK, but DB save failed",
+            "file_id": file_id,
+            "results": result,
+            "db_error": str(e),
+        }
 
     return {
         "message": "Upload and processing successful",
@@ -503,6 +550,8 @@ def patient_list_notes(
     client_id: str,
     session: Session = Depends(get_session),
 ):
+    client_id = norm_client_id(client_id)
+
     patient = get_user_by_client_id(session, client_id)
     if not patient:
         return {"error": "user_not_found"}
@@ -527,38 +576,44 @@ def patient_list_notes(
     }
 
 # -------------------------------------------------------------------
-# History (FIXED: pull from Postgres, not legacy JSON file)
+# History (DB first, JSON fallback) — so old JSON history "reappears"
 # -------------------------------------------------------------------
 
 @app.get("/history/{client_id}")
-def get_client_history(
-    client_id: str,
-    session: Session = Depends(get_session),
-):
-    from app.models_movement import MovementResult
+def get_client_history(client_id: str, session: Session = Depends(get_session)):
+    client_id = norm_client_id(client_id)
 
+    # 1) DB first
     user = session.exec(select(User).where(User.email == client_id)).first()
-    if not user:
-        return JSONResponse(status_code=404, content={"message": "Client not found"})
+    if user:
+        rows = session.exec(
+            select(MovementResult)
+            .where(MovementResult.user_id == user.id)
+            .order_by(MovementResult.created_at.asc())
+        ).all()
 
-    rows = session.exec(
-        select(MovementResult)
-        .where(MovementResult.user_id == user.id)
-        .order_by(MovementResult.created_at.asc())
-    ).all()
+        if rows:
+            history = []
+            for r in rows:
+                created_at = getattr(r, "created_at", None)
+                history.append({
+                    "movement": getattr(r, "movement", None),
+                    "side": getattr(r, "side", None),
+                    "max_angle": getattr(r, "max_angle", None),
+                    "min_angle": getattr(r, "min_angle", None),
+                    "rom": getattr(r, "rom", None),
+                    "created_at": created_at.isoformat() + "Z" if created_at else None,
+                })
+            return {"client_id": client_id, "history": history}
 
-    history = []
-    for r in rows:
-        history.append({
-            "movement": getattr(r, "movement", None),
-            "side": getattr(r, "side", None),
-            "max_angle": getattr(r, "max_angle", None),
-            "min_angle": getattr(r, "min_angle", None),
-            "rom": getattr(r, "rom", None),
-            "created_at": r.created_at.isoformat() + "Z" if getattr(r, "created_at", None) else None,
-        })
+    # 2) JSON fallback (legacy)
+    history_file = os.path.join(HISTORY_DIR, f"{client_id}.json")
+    if os.path.exists(history_file):
+        with open(history_file, "r") as f:
+            history = json.load(f)
+        return {"client_id": client_id, "history": history}
 
-    return {"client_id": client_id, "history": history}
+    return JSONResponse(status_code=404, content={"message": "Client not found"})
 
 # -------------------------------------------------------------------
 # Startup
