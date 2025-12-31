@@ -1,4 +1,5 @@
 # app/main.py
+
 from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,6 +9,8 @@ import shutil
 import json
 import traceback
 from datetime import datetime
+import threading
+import time
 
 from sqlmodel import Session, select
 
@@ -67,6 +70,31 @@ def _parse_bool(value: str, default: bool = True) -> bool:
     return default
 
 # -------------------------------------------------------------------
+# MediaPipe warmup (prevents first /upload paying multi-minute init)
+# -------------------------------------------------------------------
+
+def _warmup_mediapipe():
+    """
+    Loads MediaPipe/TFLite once so the first /upload doesn't pay the init cost.
+    Runs in a background thread so Render startup isn't blocked.
+    """
+    try:
+        t0 = time.time()
+        import numpy as np
+        import cv2
+        import mediapipe as mp
+
+        mp_pose = mp.solutions.pose
+        dummy = np.zeros((256, 256, 3), dtype=np.uint8)
+
+        with mp_pose.Pose(static_image_mode=True) as pose:
+            pose.process(cv2.cvtColor(dummy, cv2.COLOR_BGR2RGB))
+
+        print(f"WARMUP: mediapipe ready in {time.time() - t0:.2f}s")
+    except Exception as e:
+        print(f"WARMUP: failed: {e}")
+
+# -------------------------------------------------------------------
 # Root / Health
 # -------------------------------------------------------------------
 
@@ -76,6 +104,11 @@ def root():
 
 @app.get("/health", include_in_schema=False)
 def health():
+    return {"ok": True}
+
+# Optional: a warmup endpoint you can hit from Flutter if you want
+@app.get("/warmup", include_in_schema=False)
+def warmup():
     return {"ok": True}
 
 # -------------------------------------------------------------------
@@ -115,7 +148,6 @@ def update_profile(
 
     prof = ensure_profile(session, uid, email)
     prof.full_name = (full_name or "").strip()
-
     prof.updated_at = datetime.utcnow()
 
     session.add(prof)
@@ -205,7 +237,7 @@ def assign_patient(
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Clinician: TOKEN ONLY (kept)
+# Clinician: TOKEN ONLY (kept; not used if you reverted to client_id)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients")
@@ -344,7 +376,7 @@ def clinician_create_note(
     }
 
 # -------------------------------------------------------------------
-# Clinician: LEGACY client_id-based (RESTORES clinician without Firebase)
+# Clinician: LEGACY client_id-based (use these if you're back to client_id)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients_legacy")
@@ -456,7 +488,7 @@ def clinician_create_note_legacy(
     }
 
 # -------------------------------------------------------------------
-# Upload & process video (client_id form field) — NOW SAVES RELIABLY
+# Upload & process video (client_id form field) — saves to Postgres reliably
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -474,7 +506,9 @@ async def upload_video(
     compute_symmetry: str = Form("true"),
     db: Session = Depends(get_session),
 ):
-    # ✅ Normalise client_id; prevent "unknown"/blank saves
+    t0 = time.time()
+    print("UPLOAD: received request")
+
     client_id = norm_client_id(client_id)
     if not client_id:
         return JSONResponse(status_code=400, content={"error": "missing_client_id"})
@@ -490,6 +524,8 @@ async def upload_video(
     original_path = os.path.join(upload_dir, f"original{ext}")
     with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    print(f"UPLOAD: saved file in {time.time() - t0:.2f}s")
 
     try:
         result = process_video(
@@ -508,7 +544,9 @@ async def upload_video(
             content={"error": "processing_failed", "detail": str(e)},
         )
 
-    # ✅ HARD SAVE to Postgres (no helper dependency)
+    print(f"UPLOAD: processing done in {time.time() - t0:.2f}s")
+
+    # Hard save to Postgres
     try:
         row = MovementResult(
             user_id=user.id,
@@ -518,12 +556,12 @@ async def upload_video(
             max_angle=result.get("max_angle"),
             rom=result.get("rom"),
         )
-        # Set created_at if the model has it
         if hasattr(row, "created_at"):
             setattr(row, "created_at", datetime.utcnow())
 
         db.add(row)
         db.commit()
+
     except Exception as e:
         db.rollback()
         print("DB SAVE ERROR:", e)
@@ -534,6 +572,8 @@ async def upload_video(
             "results": result,
             "db_error": str(e),
         }
+
+    print(f"UPLOAD: DB save done in {time.time() - t0:.2f}s")
 
     return {
         "message": "Upload and processing successful",
@@ -576,7 +616,7 @@ def patient_list_notes(
     }
 
 # -------------------------------------------------------------------
-# History (DB first, JSON fallback) — so old JSON history "reappears"
+# History (DB first, JSON fallback)
 # -------------------------------------------------------------------
 
 @app.get("/history/{client_id}")
@@ -622,3 +662,4 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
 @app.on_event("startup")
 async def startup():
     create_db_and_tables()
+    threading.Thread(target=_warmup_mediapipe, daemon=True).start()
