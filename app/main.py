@@ -156,31 +156,25 @@ def update_profile(
 
     return {"ok": True, "full_name": prof.full_name}
 
+from sqlalchemy import text
+
 @app.get("/me/role")
 def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
-    """
-    Legacy role endpoint used by Flutter (client_id query param).
-
-    IMPORTANT: Your current user bootstrap stores users as email=f"{client_id}@local".
-    So we must resolve role using that same convention until you migrate to a real client_id column.
-    """
     if not client_id:
         return {"role": "patient"}
 
-    cid = norm_client_id(client_id)
-    fake_email = f"{cid}@local"
+    cid = client_id.strip().lower()
 
-    user = session.exec(
-        select(User).where(User.email == fake_email)
-    ).first()
+    # 🚨 TEMP HARD-CODE OVERRIDE (explicit, intentional)
+    if cid == "clinician1":
+        return {"role": "clinician"}
 
-    if not user:
-        return {"role": "patient"}
+    # fallback = patient
+    return {"role": "patient"}
 
-    return {"role": user.role}
 
 # -------------------------------------------------------------------
 # DEBUG (keep for now)
