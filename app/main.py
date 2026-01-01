@@ -189,6 +189,22 @@ def debug_db(session: Session = Depends(get_session)):
     users = session.exec(select(User)).all()
     return {"ok": True, "user_count": len(users)}
 
+@app.get("/debug/users", include_in_schema=False)
+def debug_users(session: Session = Depends(get_session)):
+    users = session.exec(select(User)).all()
+    return {
+        "count": len(users),
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "role": u.role,
+            }
+            for u in users
+        ],
+    }
+
+
 @app.get("/debug/results", include_in_schema=False)
 def debug_results(session: Session = Depends(get_session)):
     rows = session.exec(select(MovementResult)).all()
