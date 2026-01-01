@@ -161,23 +161,23 @@ def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
-    if not client_id:
-        return {"role": "patient"}
+    # 🔒 Explicit legacy path: client_id-based role lookup
+    if client_id:
+        client_id = norm_client_id(client_id)
 
-    client_id = norm_client_id(client_id)
+        user = session.exec(
+            select(User).where(User.email == client_id)
+        ).first()
 
-    user = session.exec(
-        select(User)
-        .where(User.email == client_id)
-        .order_by(User.id.desc())
-    ).first()
+        if not user:
+            return {"role": "patient"}
 
-    if not user:
-        return {"role": "patient"}
+        # DO NOT default or override
+        return {"role": user.role}
 
-    # 🔒 authoritative role from User table
-    role = (user.role or "patient").strip().lower()
-    return {"role": role}
+    # 🔒 No client_id = patient (Flutter legacy safety)
+    return {"role": "patient"}
+
 
 
 # -------------------------------------------------------------------
