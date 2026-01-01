@@ -161,21 +161,24 @@ def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
-    """
-    Backwards-compatible endpoint.
-
-    - If Flutter calls /me/role?client_id=XYZ, this returns role from User table.
-    - If no client_id, defaults to patient.
-    """
     if not client_id:
         return {"role": "patient"}
 
     client_id = norm_client_id(client_id)
-    user = session.exec(select(User).where(User.email == client_id)).first()
+
+    user = session.exec(
+        select(User)
+        .where(User.email == client_id)
+        .order_by(User.id.desc())
+    ).first()
 
     if not user:
         return {"role": "patient"}
-    return {"role": user.role}
+
+    # 🔒 authoritative role from User table
+    role = (user.role or "patient").strip().lower()
+    return {"role": role}
+
 
 # -------------------------------------------------------------------
 # DEBUG (keep for now)
