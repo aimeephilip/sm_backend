@@ -1,23 +1,21 @@
-# app/utils/users.py
 from sqlmodel import Session, select
 from app.models import User
 
 def get_or_create_user(session: Session, client_id: str) -> User:
     """
-    Temporary user bootstrap using client_id.
-    This will be replaced later by real auth.
+    Bootstrap user using real client_id.
     """
-    fake_email = f"{client_id}@local"
+    client_id = (client_id or "").strip().lower()
 
     user = session.exec(
-        select(User).where(User.email == fake_email)
+        select(User).where(User.client_id == client_id)
     ).first()
 
     if user:
         return user
 
     user = User(
-        email=fake_email,
+        client_id=client_id,
         role="patient",
     )
     session.add(user)
