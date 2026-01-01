@@ -171,7 +171,7 @@ def me_role(
         return {"role": "patient"}
 
     client_id = norm_client_id(client_id)
-    user = session.exec(select(User).where(User.client_id == client_id)).first()
+    user = session.exec(select(User).where(User.email == client_id)).first()
 
     if not user:
         return {"role": "patient"}
