@@ -1,6 +1,6 @@
 # app/main.py
 
-from fastapi import FastAPI, UploadFile, File, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uuid
@@ -12,7 +12,7 @@ from datetime import datetime
 import threading
 import time
 
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete
 
 from app.services.processor import process_video
 from app.db import create_db_and_tables, get_session
@@ -161,22 +161,26 @@ def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
+    """
+    Legacy role endpoint used by Flutter (client_id query param).
+
+    IMPORTANT: Your current user bootstrap stores users as email=f"{client_id}@local".
+    So we must resolve role using that same convention until you migrate to a real client_id column.
+    """
     if not client_id:
         return {"role": "patient"}
 
-    client_id = client_id.strip().lower()
+    cid = norm_client_id(client_id)
+    fake_email = f"{cid}@local"
 
     user = session.exec(
-        select(User).where(User.client_id == client_id)
+        select(User).where(User.email == fake_email)
     ).first()
 
     if not user:
         return {"role": "patient"}
 
     return {"role": user.role}
-
-
-
 
 # -------------------------------------------------------------------
 # DEBUG (keep for now)
@@ -193,15 +197,10 @@ def debug_users(session: Session = Depends(get_session)):
     return {
         "count": len(users),
         "users": [
-            {
-                "id": u.id,
-                "email": u.email,
-                "role": u.role,
-            }
+            {"id": u.id, "email": u.email, "role": u.role}
             for u in users
         ],
     }
-
 
 @app.get("/debug/results", include_in_schema=False)
 def debug_results(session: Session = Depends(get_session)):
@@ -214,7 +213,7 @@ def make_clinician(client_id: str, session: Session = Depends(get_session)):
     if not client_id:
         return {"error": "missing_client_id"}
 
-    # ✅ create if missing
+    # create if missing (your current get_or_create_user uses @local email convention)
     user = get_or_create_user(session, client_id)
 
     user.role = "clinician"
@@ -224,7 +223,6 @@ def make_clinician(client_id: str, session: Session = Depends(get_session)):
 
     return {"ok": True, "client_id": client_id, "role": user.role}
 
-
 @app.post("/debug/assign_patient", include_in_schema=False)
 def assign_patient(
     clinician_client_id: str,
@@ -233,6 +231,7 @@ def assign_patient(
 ):
     """
     Links clinician -> patient using your existing User table.
+    NOTE: These lookups currently assume legacy User.email identifiers.
     """
     from app.models_clinician import ClinicianPatient
 
@@ -252,6 +251,15 @@ def assign_patient(
     session.add(link)
     session.commit()
 
+    return {"ok": True}
+
+@app.post("/debug/reset_users", include_in_schema=False)
+def reset_users(session: Session = Depends(get_session)):
+    """
+    Safest reset: ORM delete (avoids Postgres reserved-word issues with table name "user").
+    """
+    session.exec(delete(User))
+    session.commit()
     return {"ok": True}
 
 # -------------------------------------------------------------------
@@ -674,29 +682,14 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
     return JSONResponse(status_code=404, content={"message": "Client not found"})
 
 # -------------------------------------------------------------------
-# Startup
+# Symmetry save
 # -------------------------------------------------------------------
-
-@app.on_event("startup")
-async def startup():
-    create_db_and_tables()
-    threading.Thread(target=_warmup_mediapipe, daemon=True).start()
-
-from fastapi import Body
-from datetime import datetime
-from sqlmodel import select
-from app.models import User
-from app.models_movement import MovementResult
-from app.utils.users import get_or_create_user
 
 @app.post("/symmetry/save")
 def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_session)):
     client_id = (payload.get("client_id") or "").strip().lower()
     movement = (payload.get("movement") or "").strip().lower()
     symmetry = payload.get("symmetry", None)
-
-    right_max = payload.get("right_max", None)
-    left_max = payload.get("left_max", None)
 
     if not client_id or not movement or symmetry is None:
         return JSONResponse(status_code=400, content={"error": "missing_fields"})
@@ -718,9 +711,11 @@ def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_sess
     session.commit()
     return {"ok": True}
 
-@app.post("/debug/reset_users", include_in_schema=False)
-def reset_users(session: Session = Depends(get_session)):
-    session.exec("DELETE FROM user")
-    session.commit()
-    return {"ok": True}
+# -------------------------------------------------------------------
+# Startup
+# -------------------------------------------------------------------
 
+@app.on_event("startup")
+async def startup():
+    create_db_and_tables()
+    threading.Thread(target=_warmup_mediapipe, daemon=True).start()
