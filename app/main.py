@@ -717,3 +717,10 @@ def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_sess
     session.add(row)
     session.commit()
     return {"ok": True}
+
+@app.post("/debug/reset_users", include_in_schema=False)
+def reset_users(session: Session = Depends(get_session)):
+    session.exec("DELETE FROM user")
+    session.commit()
+    return {"ok": True}
+
