@@ -209,19 +209,30 @@ def debug_results(session: Session = Depends(get_session)):
 
 @app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
 def make_clinician(client_id: str, session: Session = Depends(get_session)):
-    client_id = norm_client_id(client_id)
-    if not client_id:
+    cid = norm_client_id(client_id)
+    if not cid:
         return {"error": "missing_client_id"}
 
-    # create if missing (your current get_or_create_user uses @local email convention)
-    user = get_or_create_user(session, client_id)
+    fake_email = f"{cid}@local"
 
+    # Find existing row first
+    user = session.exec(select(User).where(User.email == fake_email)).first()
+
+    # Create if missing (directly, no helper)
+    if not user:
+        user = User(email=fake_email, role="patient")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+    # Promote to clinician
     user.role = "clinician"
     session.add(user)
     session.commit()
     session.refresh(user)
 
-    return {"ok": True, "client_id": client_id, "role": user.role}
+    return {"ok": True, "client_id": cid, "email": user.email, "role": user.role}
+
 
 @app.post("/debug/assign_patient", include_in_schema=False)
 def assign_patient(
