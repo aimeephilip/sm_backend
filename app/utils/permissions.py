@@ -4,9 +4,12 @@ from app.models import User
 from app.models_clinician import ClinicianPatient
 
 def get_user_by_client_id(session: Session, client_id: str) -> User | None:
-    return session.exec(
-        select(User).where(User.email == f"{client_id}@local")
-    ).first()
+    cid = (client_id or "").strip().lower()
+    if not cid:
+        return None
+    email = cid if "@" in cid else f"{cid}@local"
+    return session.exec(select(User).where(User.email == email)).first()
+
 
 def clinician_can_access_patient(session: Session, clinician: User, patient: User) -> bool:
     if clinician.role != "clinician":
