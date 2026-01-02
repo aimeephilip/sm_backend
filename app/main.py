@@ -36,6 +36,7 @@ from app.utils.users import get_or_create_user
 from app.utils.permissions import (
     get_user_by_client_id,
     clinician_can_access_patient,
+    to_user_email,  # ✅ now imported and used everywhere
 )
 
 app = FastAPI(
@@ -106,7 +107,6 @@ def root():
 def health():
     return {"ok": True}
 
-# Optional: a warmup endpoint you can hit from Flutter if you want
 @app.get("/warmup", include_in_schema=False)
 def warmup():
     return {"ok": True}
@@ -156,25 +156,32 @@ def update_profile(
 
     return {"ok": True, "full_name": prof.full_name}
 
-from sqlalchemy import text
-
 @app.get("/me/role")
 def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
+    """
+    Legacy role endpoint used by Flutter in your current flow.
+    Accepts:
+      - clinician1
+      - clinician1@local
+    """
     if not client_id:
         return {"role": "patient"}
 
-    cid = client_id.strip().lower()
+    cid = norm_client_id(client_id)
 
     # 🚨 TEMP HARD-CODE OVERRIDE (explicit, intentional)
-    if cid == "clinician1":
+    if cid == "clinician1" or cid == "clinician1@local":
         return {"role": "clinician"}
 
-    # fallback = patient
-    return {"role": "patient"}
+    # Optional: if you want DB-based lookup again later, use:
+    # email = to_user_email(client_id)
+    # user = session.exec(select(User).where(User.email == email)).first()
+    # if user: return {"role": user.role}
 
+    return {"role": "patient"}
 
 # -------------------------------------------------------------------
 # DEBUG (keep for now)
@@ -203,30 +210,28 @@ def debug_results(session: Session = Depends(get_session)):
 
 @app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
 def make_clinician(client_id: str, session: Session = Depends(get_session)):
+    """
+    Accepts clinician1 OR clinician1@local. Writes User.email as @local.
+    """
     cid = norm_client_id(client_id)
     if not cid:
         return {"error": "missing_client_id"}
 
-    fake_email = f"{cid}@local"
+    email = to_user_email(cid)  # ✅ normalise
 
-    # Find existing row first
-    user = session.exec(select(User).where(User.email == fake_email)).first()
-
-    # Create if missing (directly, no helper)
+    user = session.exec(select(User).where(User.email == email)).first()
     if not user:
-        user = User(email=fake_email, role="patient")
+        user = User(email=email, role="patient")
         session.add(user)
         session.commit()
         session.refresh(user)
 
-    # Promote to clinician
     user.role = "clinician"
     session.add(user)
     session.commit()
     session.refresh(user)
 
     return {"ok": True, "client_id": cid, "email": user.email, "role": user.role}
-
 
 @app.post("/debug/assign_patient", include_in_schema=False)
 def assign_patient(
@@ -235,22 +240,22 @@ def assign_patient(
     session: Session = Depends(get_session),
 ):
     """
-    Links clinician -> patient using your existing User table.
-    NOTE: These lookups currently assume legacy User.email identifiers.
+    Links clinician -> patient.
+    Accepts either raw ids or @local ids.
     """
     from app.models_clinician import ClinicianPatient
 
-    clinician_client_id = norm_client_id(clinician_client_id)
-    patient_client_id = norm_client_id(patient_client_id)
+    clinician_email = to_user_email(clinician_client_id)
+    patient_email = to_user_email(patient_client_id)
 
-    clinician = session.exec(select(User).where(User.email == clinician_client_id)).first()
-    patient = session.exec(select(User).where(User.email == patient_client_id)).first()
+    clinician = session.exec(select(User).where(User.email == clinician_email)).first()
+    patient = session.exec(select(User).where(User.email == patient_email)).first()
 
     if not clinician or not patient:
-        return {"error": "user_not_found"}
+        return {"error": "user_not_found", "clinician": clinician_email, "patient": patient_email}
 
     if clinician.role != "clinician":
-        return {"error": "not_a_clinician"}
+        return {"error": "not_a_clinician", "role": clinician.role}
 
     link = ClinicianPatient(clinician_id=clinician.id, patient_id=patient.id)
     session.add(link)
@@ -276,9 +281,6 @@ def clinician_patients(
     claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
-    """
-    Token-based clinician list.
-    """
     from app.models_clinician import ClinicianPatient
 
     uid = claims.get("uid")
@@ -301,17 +303,13 @@ def clinician_patients(
     links = session.exec(
         select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
     ).all()
-    patient_ids = [l.patient_id for l in links]
 
+    patient_ids = [l.patient_id for l in links]
     if not patient_ids:
         return {"clinician": prof.email, "patients": []}
 
     patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
-
-    return {
-        "clinician": prof.email,
-        "patients": [{"id": p.id, "client_id": p.email} for p in patients],
-    }
+    return {"clinician": prof.email, "patients": [{"id": p.id, "client_id": p.email} for p in patients]}
 
 @app.get("/clinician/patient/notes")
 def clinician_list_notes(
@@ -319,7 +317,7 @@ def clinician_list_notes(
     claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
-    patient_client_id = norm_client_id(patient_client_id)
+    patient_email = to_user_email(patient_client_id)
 
     uid = claims.get("uid")
     email = claims.get("email")
@@ -331,7 +329,7 @@ def clinician_list_notes(
         return {"error": "not_authorised"}
 
     clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
 
     if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
@@ -346,7 +344,7 @@ def clinician_list_notes(
     ).all()
 
     return {
-        "patient_client_id": patient_client_id,
+        "patient_client_id": patient_email,
         "notes": [
             {
                 "id": n.id,
@@ -366,7 +364,7 @@ def clinician_create_note(
     claims=Depends(get_firebase_claims),
     session: Session = Depends(get_session),
 ):
-    patient_client_id = norm_client_id(patient_client_id)
+    patient_email = to_user_email(patient_client_id)
 
     uid = claims.get("uid")
     email = claims.get("email")
@@ -378,7 +376,7 @@ def clinician_create_note(
         return {"error": "not_authorised"}
 
     clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
 
     if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
@@ -407,7 +405,7 @@ def clinician_create_note(
     }
 
 # -------------------------------------------------------------------
-# Clinician: LEGACY client_id-based (use these if you're back to client_id)
+# Clinician: LEGACY client_id-based (Flutter legacy screens)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients_legacy")
@@ -415,29 +413,38 @@ def clinician_patients_legacy(
     clinician_client_id: str,
     session: Session = Depends(get_session),
 ):
+    """
+    ✅ This is what your Flutter ClinicianPatientsScreen calls.
+    It MUST accept either 'clinician1' or 'clinician1@local'.
+    """
     from app.models_clinician import ClinicianPatient
 
-    clinician_client_id = norm_client_id(clinician_client_id)
+    try:
+        clinician_email = to_user_email(clinician_client_id)
 
-    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
-    if not clinician_user:
-        return {"error": "user_not_found"}
-    if clinician_user.role != "clinician":
-        return {"error": "not_authorised"}
+        clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
+        if not clinician_user:
+            return JSONResponse(status_code=404, content={"error": "user_not_found", "clinician": clinician_email})
 
-    links = session.exec(
-        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
-    ).all()
-    patient_ids = [l.patient_id for l in links]
+        if clinician_user.role != "clinician":
+            return JSONResponse(status_code=403, content={"error": "not_authorised", "role": clinician_user.role})
 
-    if not patient_ids:
-        return {"clinician": clinician_user.email, "patients": []}
+        links = session.exec(
+            select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
+        ).all()
+        patient_ids = [l.patient_id for l in links]
 
-    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
-    return {
-        "clinician": clinician_user.email,
-        "patients": [{"id": p.id, "client_id": p.email} for p in patients],
-    }
+        if not patient_ids:
+            return {"clinician": clinician_user.email, "patients": []}
+
+        patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
+        return {
+            "clinician": clinician_user.email,
+            "patients": [{"id": p.id, "client_id": p.email} for p in patients],
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "server_error", "detail": str(e)})
 
 @app.get("/clinician/patient/notes_legacy")
 def clinician_list_notes_legacy(
@@ -445,11 +452,11 @@ def clinician_list_notes_legacy(
     patient_client_id: str,
     session: Session = Depends(get_session),
 ):
-    clinician_client_id = norm_client_id(clinician_client_id)
-    patient_client_id = norm_client_id(patient_client_id)
+    clinician_email = to_user_email(clinician_client_id)
+    patient_email = to_user_email(patient_client_id)
 
-    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+    clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
 
     if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
@@ -465,7 +472,7 @@ def clinician_list_notes_legacy(
     ).all()
 
     return {
-        "patient_client_id": patient_client_id,
+        "patient_client_id": patient_email,
         "notes": [
             {
                 "id": n.id,
@@ -485,11 +492,11 @@ def clinician_create_note_legacy(
     note: str,
     session: Session = Depends(get_session),
 ):
-    clinician_client_id = norm_client_id(clinician_client_id)
-    patient_client_id = norm_client_id(patient_client_id)
+    clinician_email = to_user_email(clinician_client_id)
+    patient_email = to_user_email(patient_client_id)
 
-    clinician_user = session.exec(select(User).where(User.email == clinician_client_id)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_client_id)).first()
+    clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
+    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
 
     if not clinician_user or not patient_user:
         return {"error": "user_not_found"}
@@ -544,7 +551,7 @@ async def upload_video(
     if not client_id:
         return JSONResponse(status_code=400, content={"error": "missing_client_id"})
 
-    # Ensure user exists
+    # Ensure user exists (helper currently stores @local)
     user = get_or_create_user(db, client_id)
 
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -577,7 +584,6 @@ async def upload_video(
 
     print(f"UPLOAD: processing done in {time.time() - t0:.2f}s")
 
-    # Hard save to Postgres
     try:
         row = MovementResult(
             user_id=user.id,
@@ -621,8 +627,7 @@ def patient_list_notes(
     client_id: str,
     session: Session = Depends(get_session),
 ):
-    client_id = norm_client_id(client_id)
-
+    # ✅ accept abc OR abc@local
     patient = get_user_by_client_id(session, client_id)
     if not patient:
         return {"error": "user_not_found"}
@@ -634,7 +639,7 @@ def patient_list_notes(
     ).all()
 
     return {
-        "client_id": client_id,
+        "client_id": to_user_email(client_id),
         "notes": [
             {
                 "id": n.id,
@@ -652,10 +657,10 @@ def patient_list_notes(
 
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str, session: Session = Depends(get_session)):
-    client_id = norm_client_id(client_id)
+    cid = norm_client_id(client_id)
+    user_email = to_user_email(cid)
 
-    # 1) DB first
-    user = session.exec(select(User).where(User.email == client_id)).first()
+    user = session.exec(select(User).where(User.email == user_email)).first()
     if user:
         rows = session.exec(
             select(MovementResult)
@@ -675,14 +680,13 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
                     "rom": getattr(r, "rom", None),
                     "created_at": created_at.isoformat() + "Z" if created_at else None,
                 })
-            return {"client_id": client_id, "history": history}
+            return {"client_id": user_email, "history": history}
 
-    # 2) JSON fallback (legacy)
-    history_file = os.path.join(HISTORY_DIR, f"{client_id}.json")
+    history_file = os.path.join(HISTORY_DIR, f"{cid}.json")
     if os.path.exists(history_file):
         with open(history_file, "r") as f:
             history = json.load(f)
-        return {"client_id": client_id, "history": history}
+        return {"client_id": cid, "history": history}
 
     return JSONResponse(status_code=404, content={"message": "Client not found"})
 
