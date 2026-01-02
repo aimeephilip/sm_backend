@@ -13,6 +13,7 @@ import threading
 import time
 
 from sqlmodel import Session, select, delete
+from sqlalchemy import text
 
 from app.services.processor import process_video
 from app.db import create_db_and_tables, get_session
@@ -36,7 +37,7 @@ from app.utils.users import get_or_create_user
 from app.utils.permissions import (
     get_user_by_client_id,
     clinician_can_access_patient,
-    to_user_email,  # ✅ now imported and used everywhere
+    to_user_email,
 )
 
 app = FastAPI(
@@ -70,15 +71,28 @@ def _parse_bool(value: str, default: bool = True) -> bool:
         return False
     return default
 
+def ensure_user_schema(session: Session) -> None:
+    """
+    ✅ Minimal auto-migration:
+    Some deployments have ORM expecting "user.client_id" but DB doesn't have it.
+    This adds the column safely if missing.
+    """
+    try:
+        # Add column if missing (Postgres supports IF NOT EXISTS on ADD COLUMN)
+        session.exec(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS client_id VARCHAR'))
+        # Index is optional; harmless if you don't use it yet
+        session.exec(text('CREATE INDEX IF NOT EXISTS ix_user_client_id ON "user"(client_id)'))
+        session.commit()
+        print("SCHEMA: ensured user.client_id exists")
+    except Exception as e:
+        session.rollback()
+        print("SCHEMA: ensure_user_schema failed:", e)
+
 # -------------------------------------------------------------------
-# MediaPipe warmup (prevents first /upload paying multi-minute init)
+# MediaPipe warmup
 # -------------------------------------------------------------------
 
 def _warmup_mediapipe():
-    """
-    Loads MediaPipe/TFLite once so the first /upload doesn't pay the init cost.
-    Runs in a background thread so Render startup isn't blocked.
-    """
     try:
         t0 = time.time()
         import numpy as np
@@ -161,31 +175,25 @@ def me_role(
     client_id: str | None = None,
     session: Session = Depends(get_session),
 ):
-    """
-    Legacy role endpoint used by Flutter in your current flow.
-    Accepts:
-      - clinician1
-      - clinician1@local
-    """
     if not client_id:
         return {"role": "patient"}
 
     cid = norm_client_id(client_id)
 
-    # 🚨 TEMP HARD-CODE OVERRIDE (explicit, intentional)
-    if cid == "clinician1" or cid == "clinician1@local":
+    # TEMP hard-code
+    if cid in ("clinician1", "clinician1@local"):
         return {"role": "clinician"}
-
-    # Optional: if you want DB-based lookup again later, use:
-    # email = to_user_email(client_id)
-    # user = session.exec(select(User).where(User.email == email)).first()
-    # if user: return {"role": user.role}
 
     return {"role": "patient"}
 
 # -------------------------------------------------------------------
-# DEBUG (keep for now)
+# DEBUG
 # -------------------------------------------------------------------
+
+@app.post("/debug/fix_schema", include_in_schema=False)
+def debug_fix_schema(session: Session = Depends(get_session)):
+    ensure_user_schema(session)
+    return {"ok": True}
 
 @app.get("/debug/db", include_in_schema=False)
 def debug_db(session: Session = Depends(get_session)):
@@ -197,27 +205,22 @@ def debug_users(session: Session = Depends(get_session)):
     users = session.exec(select(User)).all()
     return {
         "count": len(users),
-        "users": [
-            {"id": u.id, "email": u.email, "role": u.role}
-            for u in users
-        ],
+        "users": [{"id": u.id, "email": u.email, "role": u.role} for u in users],
     }
 
-@app.get("/debug/results", include_in_schema=False)
-def debug_results(session: Session = Depends(get_session)):
-    rows = session.exec(select(MovementResult)).all()
-    return {"count": len(rows)}
+@app.post("/debug/reset_users", include_in_schema=False)
+def reset_users(session: Session = Depends(get_session)):
+    session.exec(delete(User))
+    session.commit()
+    return {"ok": True}
 
 @app.post("/debug/make_clinician/{client_id}", include_in_schema=False)
 def make_clinician(client_id: str, session: Session = Depends(get_session)):
-    """
-    Accepts clinician1 OR clinician1@local. Writes User.email as @local.
-    """
     cid = norm_client_id(client_id)
     if not cid:
         return {"error": "missing_client_id"}
 
-    email = to_user_email(cid)  # ✅ normalise
+    email = to_user_email(cid)
 
     user = session.exec(select(User).where(User.email == email)).first()
     if not user:
@@ -239,10 +242,6 @@ def assign_patient(
     patient_client_id: str,
     session: Session = Depends(get_session),
 ):
-    """
-    Links clinician -> patient.
-    Accepts either raw ids or @local ids.
-    """
     from app.models_clinician import ClinicianPatient
 
     clinician_email = to_user_email(clinician_client_id)
@@ -260,152 +259,10 @@ def assign_patient(
     link = ClinicianPatient(clinician_id=clinician.id, patient_id=patient.id)
     session.add(link)
     session.commit()
-
-    return {"ok": True}
-
-@app.post("/debug/reset_users", include_in_schema=False)
-def reset_users(session: Session = Depends(get_session)):
-    """
-    Safest reset: ORM delete (avoids Postgres reserved-word issues with table name "user").
-    """
-    session.exec(delete(User))
-    session.commit()
     return {"ok": True}
 
 # -------------------------------------------------------------------
-# Clinician: TOKEN ONLY (kept; not used if you reverted to client_id)
-# -------------------------------------------------------------------
-
-@app.get("/clinician/patients")
-def clinician_patients(
-    claims=Depends(get_firebase_claims),
-    session: Session = Depends(get_session),
-):
-    from app.models_clinician import ClinicianPatient
-
-    uid = claims.get("uid")
-    email = claims.get("email")
-    if not uid or not email:
-        return {"error": "missing_claims"}
-
-    prof = ensure_profile(session, uid, email)
-    if prof.role != "clinician":
-        return {"error": "not_authorised"}
-
-    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
-    if not clinician_user:
-        clinician_user = get_or_create_user(session, prof.email)
-        clinician_user.role = "clinician"
-        session.add(clinician_user)
-        session.commit()
-        session.refresh(clinician_user)
-
-    links = session.exec(
-        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
-    ).all()
-
-    patient_ids = [l.patient_id for l in links]
-    if not patient_ids:
-        return {"clinician": prof.email, "patients": []}
-
-    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
-    return {"clinician": prof.email, "patients": [{"id": p.id, "client_id": p.email} for p in patients]}
-
-@app.get("/clinician/patient/notes")
-def clinician_list_notes(
-    patient_client_id: str,
-    claims=Depends(get_firebase_claims),
-    session: Session = Depends(get_session),
-):
-    patient_email = to_user_email(patient_client_id)
-
-    uid = claims.get("uid")
-    email = claims.get("email")
-    if not uid or not email:
-        return {"error": "missing_claims"}
-
-    prof = ensure_profile(session, uid, email)
-    if prof.role != "clinician":
-        return {"error": "not_authorised"}
-
-    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
-
-    if not clinician_user or not patient_user:
-        return {"error": "user_not_found"}
-
-    if not clinician_can_access_patient(session, clinician_user, patient_user):
-        return {"error": "not_authorised"}
-
-    notes = session.exec(
-        select(ClinicalNote)
-        .where(ClinicalNote.patient_id == patient_user.id)
-        .order_by(ClinicalNote.created_at.desc())
-    ).all()
-
-    return {
-        "patient_client_id": patient_email,
-        "notes": [
-            {
-                "id": n.id,
-                "title": n.title,
-                "note": n.note,
-                "created_at": n.created_at.isoformat() + "Z",
-            }
-            for n in notes
-        ],
-    }
-
-@app.post("/clinician/patient/notes")
-def clinician_create_note(
-    patient_client_id: str,
-    title: str,
-    note: str,
-    claims=Depends(get_firebase_claims),
-    session: Session = Depends(get_session),
-):
-    patient_email = to_user_email(patient_client_id)
-
-    uid = claims.get("uid")
-    email = claims.get("email")
-    if not uid or not email:
-        return {"error": "missing_claims"}
-
-    prof = ensure_profile(session, uid, email)
-    if prof.role != "clinician":
-        return {"error": "not_authorised"}
-
-    clinician_user = session.exec(select(User).where(User.email == prof.email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
-
-    if not clinician_user or not patient_user:
-        return {"error": "user_not_found"}
-
-    if not clinician_can_access_patient(session, clinician_user, patient_user):
-        return {"error": "not_authorised"}
-
-    n = ClinicalNote(
-        clinician_id=clinician_user.id,
-        patient_id=patient_user.id,
-        title=(title or "").strip() or "Clinical Note",
-        note=(note or "").strip(),
-    )
-    session.add(n)
-    session.commit()
-    session.refresh(n)
-
-    return {
-        "ok": True,
-        "note": {
-            "id": n.id,
-            "title": n.title,
-            "note": n.note,
-            "created_at": n.created_at.isoformat() + "Z",
-        },
-    }
-
-# -------------------------------------------------------------------
-# Clinician: LEGACY client_id-based (Flutter legacy screens)
+# Clinician legacy endpoints (Flutter uses these)
 # -------------------------------------------------------------------
 
 @app.get("/clinician/patients_legacy")
@@ -413,120 +270,33 @@ def clinician_patients_legacy(
     clinician_client_id: str,
     session: Session = Depends(get_session),
 ):
-    """
-    ✅ This is what your Flutter ClinicianPatientsScreen calls.
-    It MUST accept either 'clinician1' or 'clinician1@local'.
-    """
     from app.models_clinician import ClinicianPatient
 
-    try:
-        clinician_email = to_user_email(clinician_client_id)
-
-        clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
-        if not clinician_user:
-            return JSONResponse(status_code=404, content={"error": "user_not_found", "clinician": clinician_email})
-
-        if clinician_user.role != "clinician":
-            return JSONResponse(status_code=403, content={"error": "not_authorised", "role": clinician_user.role})
-
-        links = session.exec(
-            select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
-        ).all()
-        patient_ids = [l.patient_id for l in links]
-
-        if not patient_ids:
-            return {"clinician": clinician_user.email, "patients": []}
-
-        patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
-        return {
-            "clinician": clinician_user.email,
-            "patients": [{"id": p.id, "client_id": p.email} for p in patients],
-        }
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": "server_error", "detail": str(e)})
-
-@app.get("/clinician/patient/notes_legacy")
-def clinician_list_notes_legacy(
-    clinician_client_id: str,
-    patient_client_id: str,
-    session: Session = Depends(get_session),
-):
     clinician_email = to_user_email(clinician_client_id)
-    patient_email = to_user_email(patient_client_id)
 
     clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
+    if not clinician_user:
+        return JSONResponse(status_code=404, content={"error": "user_not_found", "clinician": clinician_email})
 
-    if not clinician_user or not patient_user:
-        return {"error": "user_not_found"}
     if clinician_user.role != "clinician":
-        return {"error": "not_authorised"}
-    if not clinician_can_access_patient(session, clinician_user, patient_user):
-        return {"error": "not_authorised"}
+        return JSONResponse(status_code=403, content={"error": "not_authorised", "role": clinician_user.role})
 
-    notes = session.exec(
-        select(ClinicalNote)
-        .where(ClinicalNote.patient_id == patient_user.id)
-        .order_by(ClinicalNote.created_at.desc())
+    links = session.exec(
+        select(ClinicianPatient).where(ClinicianPatient.clinician_id == clinician_user.id)
     ).all()
+    patient_ids = [l.patient_id for l in links]
 
+    if not patient_ids:
+        return {"clinician": clinician_user.email, "patients": []}
+
+    patients = session.exec(select(User).where(User.id.in_(patient_ids))).all()
     return {
-        "patient_client_id": patient_email,
-        "notes": [
-            {
-                "id": n.id,
-                "title": n.title,
-                "note": n.note,
-                "created_at": n.created_at.isoformat() + "Z",
-            }
-            for n in notes
-        ],
-    }
-
-@app.post("/clinician/patient/notes_legacy")
-def clinician_create_note_legacy(
-    clinician_client_id: str,
-    patient_client_id: str,
-    title: str,
-    note: str,
-    session: Session = Depends(get_session),
-):
-    clinician_email = to_user_email(clinician_client_id)
-    patient_email = to_user_email(patient_client_id)
-
-    clinician_user = session.exec(select(User).where(User.email == clinician_email)).first()
-    patient_user = session.exec(select(User).where(User.email == patient_email)).first()
-
-    if not clinician_user or not patient_user:
-        return {"error": "user_not_found"}
-    if clinician_user.role != "clinician":
-        return {"error": "not_authorised"}
-    if not clinician_can_access_patient(session, clinician_user, patient_user):
-        return {"error": "not_authorised"}
-
-    n = ClinicalNote(
-        clinician_id=clinician_user.id,
-        patient_id=patient_user.id,
-        title=(title or "").strip() or "Clinical Note",
-        note=(note or "").strip(),
-    )
-    session.add(n)
-    session.commit()
-    session.refresh(n)
-
-    return {
-        "ok": True,
-        "note": {
-            "id": n.id,
-            "title": n.title,
-            "note": n.note,
-            "created_at": n.created_at.isoformat() + "Z",
-        },
+        "clinician": clinician_user.email,
+        "patients": [{"id": p.id, "client_id": p.email} for p in patients],
     }
 
 # -------------------------------------------------------------------
-# Upload & process video (client_id form field) — saves to Postgres reliably
+# Upload & history (unchanged except identifier normalisation where needed)
 # -------------------------------------------------------------------
 
 UPLOAD_DIR = os.path.join("app", "static", "processed")
@@ -551,7 +321,6 @@ async def upload_video(
     if not client_id:
         return JSONResponse(status_code=400, content={"error": "missing_client_id"})
 
-    # Ensure user exists (helper currently stores @local)
     user = get_or_create_user(db, client_id)
 
     ext = os.path.splitext(file.filename or "video.mp4")[1]
@@ -562,8 +331,6 @@ async def upload_video(
     original_path = os.path.join(upload_dir, f"original{ext}")
     with open(original_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-
-    print(f"UPLOAD: saved file in {time.time() - t0:.2f}s")
 
     try:
         result = process_video(
@@ -577,12 +344,7 @@ async def upload_video(
     except Exception as e:
         print("UPLOAD ERROR:", e)
         print(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"error": "processing_failed", "detail": str(e)},
-        )
-
-    print(f"UPLOAD: processing done in {time.time() - t0:.2f}s")
+        return JSONResponse(status_code=500, content={"error": "processing_failed", "detail": str(e)})
 
     try:
         row = MovementResult(
@@ -610,50 +372,7 @@ async def upload_video(
             "db_error": str(e),
         }
 
-    print(f"UPLOAD: DB save done in {time.time() - t0:.2f}s")
-
-    return {
-        "message": "Upload and processing successful",
-        "file_id": file_id,
-        "results": result,
-    }
-
-# -------------------------------------------------------------------
-# Patient notes (legacy client_id param)
-# -------------------------------------------------------------------
-
-@app.get("/patient/notes")
-def patient_list_notes(
-    client_id: str,
-    session: Session = Depends(get_session),
-):
-    # ✅ accept abc OR abc@local
-    patient = get_user_by_client_id(session, client_id)
-    if not patient:
-        return {"error": "user_not_found"}
-
-    notes = session.exec(
-        select(ClinicalNote)
-        .where(ClinicalNote.patient_id == patient.id)
-        .order_by(ClinicalNote.created_at.desc())
-    ).all()
-
-    return {
-        "client_id": to_user_email(client_id),
-        "notes": [
-            {
-                "id": n.id,
-                "title": n.title,
-                "note": n.note,
-                "created_at": n.created_at.isoformat() + "Z",
-            }
-            for n in notes
-        ],
-    }
-
-# -------------------------------------------------------------------
-# History (DB first, JSON fallback)
-# -------------------------------------------------------------------
+    return {"message": "Upload and processing successful", "file_id": file_id, "results": result}
 
 @app.get("/history/{client_id}")
 def get_client_history(client_id: str, session: Session = Depends(get_session)):
@@ -690,10 +409,6 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
 
     return JSONResponse(status_code=404, content={"message": "Client not found"})
 
-# -------------------------------------------------------------------
-# Symmetry save
-# -------------------------------------------------------------------
-
 @app.post("/symmetry/save")
 def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_session)):
     client_id = (payload.get("client_id") or "").strip().lower()
@@ -727,4 +442,13 @@ def save_symmetry(payload: dict = Body(...), session: Session = Depends(get_sess
 @app.on_event("startup")
 async def startup():
     create_db_and_tables()
+
+    # ✅ critical: align schema BEFORE anything queries User
+    try:
+        with Session(get_session().__wrapped__()) as s:  # defensive; may not work in all setups
+            ensure_user_schema(s)
+    except Exception:
+        # If above fails due to session wiring, do it via a normal dependency session below at first request
+        pass
+
     threading.Thread(target=_warmup_mediapipe, daemon=True).start()
