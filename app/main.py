@@ -228,6 +228,7 @@ def reset_users(session: Session = Depends(get_session)):
     session.commit()
     return {"ok": True}
 
+
 @app.post("/debug/assign_patient", include_in_schema=False)
 def assign_patient(
     # allow query OR form
@@ -237,68 +238,6 @@ def assign_patient(
     patient_client_id_form: str | None = Form(None),
     session: Session = Depends(get_session),
 ):
-
-@app.get("/report/pdf/{client_id}")
-def export_progress_report(client_id: str, session: Session = Depends(get_session)):
-    cid_email = email_for_client_id(client_id)
-    if not cid_email:
-        return JSONResponse(status_code=400, content={"error": "missing_client_id"})
-
-    user = session.exec(select(User).where(User.email == cid_email)).first()
-    if not user:
-        return JSONResponse(status_code=404, content={"error": "user_not_found"})
-
-    rom_rows = session.exec(
-        select(MovementResult)
-        .where(MovementResult.user_id == user.id)
-        .order_by(MovementResult.created_at.asc())
-    ).all()
-
-    notes_rows = session.exec(
-        select(ClinicalNote)
-        .where(ClinicalNote.patient_id == user.id)
-        .order_by(ClinicalNote.created_at.desc())
-    ).all()
-
-    rom_history = [
-        {
-            "movement": getattr(r, "movement", None),
-            "side": getattr(r, "side", None),
-            "max_angle": getattr(r, "max_angle", None),
-            "min_angle": getattr(r, "min_angle", None),
-            "rom": getattr(r, "rom", None),
-            "created_at": r.created_at.isoformat() + "Z" if getattr(r, "created_at", None) else None,
-        }
-        for r in rom_rows
-    ]
-
-    gait_history = load_gait_history(client_id)
-
-    notes = [
-        {
-            "title": n.title,
-            "note": n.note,
-            "created_at": n.created_at.isoformat() + "Z" if n.created_at else None,
-        }
-        for n in notes_rows
-    ]
-
-    pdf_bytes = build_progress_report_pdf(
-        client_id=cid_email,
-        rom_history=rom_history,
-        gait_history=gait_history,
-        notes=notes,
-    )
-
-    filename = f"progress_report_{norm_client_id(client_id)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-    return StreamingResponse(
-        BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        },
-    )
     """
     Links clinician -> patient.
     Minimal + safe:
@@ -321,7 +260,16 @@ def export_progress_report(client_id: str, session: Session = Depends(get_sessio
         return JSONResponse(status_code=400, content={"error": "missing_fields"})
 
     # IMPORTANT: create users if they don't exist
-    clinician_user = get_or_create_user(session, clinician_cid.replace("@local", "").replace("@", "") if clinician_cid.endswith("@local") else clinician_cid.split("@")[0] if "@local" in clinician_cid else clinician_cid if "@" not in clinician_cid else clinician_cid)
+    clinician_user = get_or_create_user(
+        session,
+        clinician_cid.replace("@local", "").replace("@", "")
+        if clinician_cid.endswith("@local")
+        else clinician_cid.split("@")[0]
+        if "@local" in clinician_cid
+        else clinician_cid
+        if "@" not in clinician_cid
+        else clinician_cid,
+    )
     # ensure clinician email is correct for local ids
     # (get_or_create_user already uses client_id -> client_id@local)
     if clinician_user.role != "clinician":
@@ -330,7 +278,16 @@ def export_progress_report(client_id: str, session: Session = Depends(get_sessio
         session.commit()
         session.refresh(clinician_user)
 
-    patient_user = get_or_create_user(session, patient_cid.replace("@local", "").replace("@", "") if patient_cid.endswith("@local") else patient_cid.split("@")[0] if "@local" in patient_cid else patient_cid if "@" not in patient_cid else patient_cid)
+    patient_user = get_or_create_user(
+        session,
+        patient_cid.replace("@local", "").replace("@", "")
+        if patient_cid.endswith("@local")
+        else patient_cid.split("@")[0]
+        if "@local" in patient_cid
+        else patient_cid
+        if "@" not in patient_cid
+        else patient_cid,
+    )
 
     # avoid duplicate link
     existing = session.exec(
@@ -346,6 +303,7 @@ def export_progress_report(client_id: str, session: Session = Depends(get_sessio
     session.add(link)
     session.commit()
     return {"ok": True}
+
 
 # -------------------------------------------------------------------
 # Clinician: LEGACY client_id-based
@@ -1160,6 +1118,69 @@ def get_client_history(client_id: str, session: Session = Depends(get_session)):
         return {"client_id": cid_email, "history": history}
 
     return JSONResponse(status_code=404, content={"message": "Client not found"})
+
+
+@app.get("/report/pdf/{client_id}")
+def export_progress_report(client_id: str, session: Session = Depends(get_session)):
+    cid_email = email_for_client_id(client_id)
+    if not cid_email:
+        return JSONResponse(status_code=400, content={"error": "missing_client_id"})
+
+    user = session.exec(select(User).where(User.email == cid_email)).first()
+    if not user:
+        return JSONResponse(status_code=404, content={"error": "user_not_found"})
+
+    rom_rows = session.exec(
+        select(MovementResult)
+        .where(MovementResult.user_id == user.id)
+        .order_by(MovementResult.created_at.asc())
+    ).all()
+
+    notes_rows = session.exec(
+        select(ClinicalNote)
+        .where(ClinicalNote.patient_id == user.id)
+        .order_by(ClinicalNote.created_at.desc())
+    ).all()
+
+    rom_history = [
+        {
+            "movement": getattr(r, "movement", None),
+            "side": getattr(r, "side", None),
+            "max_angle": getattr(r, "max_angle", None),
+            "min_angle": getattr(r, "min_angle", None),
+            "rom": getattr(r, "rom", None),
+            "created_at": r.created_at.isoformat() + "Z" if getattr(r, "created_at", None) else None,
+        }
+        for r in rom_rows
+    ]
+
+    gait_history = load_gait_history(client_id)
+
+    notes = [
+        {
+            "title": n.title,
+            "note": n.note,
+            "created_at": n.created_at.isoformat() + "Z" if n.created_at else None,
+        }
+        for n in notes_rows
+    ]
+
+    pdf_bytes = build_progress_report_pdf(
+        client_id=cid_email,
+        rom_history=rom_history,
+        gait_history=gait_history,
+        notes=notes,
+    )
+
+    filename = f"progress_report_{norm_client_id(client_id)}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
 
 # -------------------------------------------------------------------
 # Symmetry save
